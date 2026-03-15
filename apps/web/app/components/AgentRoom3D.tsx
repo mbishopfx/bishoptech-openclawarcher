@@ -1,22 +1,17 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useMotionValue, useSpring } from 'framer-motion';
 import { Activity, FolderKanban } from 'lucide-react';
 import type { AgentLog, Bucket, BucketItem } from './types';
 
-const stationPositions = [
-  { x: 150, y: 150 },
-  { x: 450, y: 200 },
-  { x: 750, y: 180 },
-  { x: 250, y: 450 },
-  { x: 550, y: 480 },
-  { x: 800, y: 500 },
-];
-
 const palette = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
+const ROOM_W = 900;
+const ROOM_H = 600;
+const TOPIC_LAYOUT_KEY = 'trd-topic-layout-v1';
 
 type TopicState = 'idle' | 'working' | 'complete' | 'failed';
+type TopicPositionMap = Record<string, { x: number; y: number }>;
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -36,6 +31,51 @@ function topicStateForBucket(bucket: Bucket, logs: AgentLog[], items: BucketItem
   return items.some((item) => item.status === 'done') ? 'complete' : 'idle';
 }
 
+function createAutoLayout(ids: string[]) {
+  if (ids.length === 0) return {} as TopicPositionMap;
+
+  const cols = Math.max(2, Math.ceil(Math.sqrt((ids.length * ROOM_W) / ROOM_H)));
+  const rows = Math.ceil(ids.length / cols);
+
+  const xPadding = 110;
+  const yPadding = 95;
+  const xStep = cols <= 1 ? 0 : (ROOM_W - xPadding * 2) / (cols - 1);
+  const yStep = rows <= 1 ? 0 : (ROOM_H - yPadding * 2) / (rows - 1);
+
+  const result: TopicPositionMap = {};
+
+  ids.forEach((id, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const stagger = row % 2 === 1 ? 18 : 0;
+
+    result[id] = {
+      x: clamp(xPadding + col * xStep + stagger, 90, ROOM_W - 90),
+      y: clamp(yPadding + row * yStep, 85, ROOM_H - 85),
+    };
+  });
+
+  return result;
+}
+
+function loadLayout() {
+  try {
+    const raw = window.localStorage.getItem(TOPIC_LAYOUT_KEY);
+    if (!raw) return {} as TopicPositionMap;
+    return JSON.parse(raw) as TopicPositionMap;
+  } catch {
+    return {} as TopicPositionMap;
+  }
+}
+
+function saveLayout(layout: TopicPositionMap) {
+  try {
+    window.localStorage.setItem(TOPIC_LAYOUT_KEY, JSON.stringify(layout));
+  } catch {
+    // ignore
+  }
+}
+
 export default function AgentRoom3D({
   buckets,
   logs,
@@ -46,7 +86,10 @@ export default function AgentRoom3D({
   itemsByBucket: Record<string, BucketItem[]>;
 }) {
   const [dragging, setDragging] = useState(false);
+  const [topicPositions, setTopicPositions] = useState<TopicPositionMap>({});
+  const [draggingTopicId, setDraggingTopicId] = useState<string | null>(null);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
+  const roomRef = useRef<HTMLDivElement | null>(null);
 
   const rotateX = useMotionValue(60);
   const rotateZ = useMotionValue(-45);
@@ -56,36 +99,59 @@ export default function AgentRoom3D({
   const sz = useSpring(rotateZ, { stiffness: 100, damping: 30 });
   const szoom = useSpring(zoom, { stiffness: 120, damping: 25 });
 
+  useEffect(() => {
+    const bucketIds = buckets.map((b) => b.id);
+    const fromStorage = loadLayout();
+    const autoLayout = createAutoLayout(bucketIds);
+
+    const merged: TopicPositionMap = {};
+    bucketIds.forEach((id) => {
+      merged[id] = fromStorage[id] ?? autoLayout[id];
+    });
+
+    setTopicPositions(merged);
+  }, [buckets]);
+
   const topics = useMemo(
     () =>
-      buckets.slice(0, 6).map((bucket, idx) => {
+      buckets.map((bucket, idx) => {
         const bucketItems = itemsByBucket[bucket.id] || [];
         return {
           ...bucket,
           color: bucket.color || palette[idx % palette.length],
-          position: stationPositions[idx],
+          position: topicPositions[bucket.id] ?? { x: 140, y: 120 },
           state: topicStateForBucket(bucket, logs, bucketItems),
           latestLog: logs.find((log) => log.bucket_id === bucket.id),
           itemCount: bucketItems.length,
           pendingCount: bucketItems.filter((i) => i.status === 'queued' || i.status === 'in_progress').length,
         };
       }),
-    [buckets, logs, itemsByBucket],
+    [buckets, logs, itemsByBucket, topicPositions],
   );
 
   const workingCount = topics.filter((t) => t.state === 'working').length;
   const recentActivity = logs.slice(0, 8);
 
+  function autoFitLayout() {
+    const ids = buckets.map((b) => b.id);
+    const autoLayout = createAutoLayout(ids);
+    setTopicPositions(autoLayout);
+    saveLayout(autoLayout);
+  }
+
   return (
     <div className="space-y-4">
-      <div className="cyber-panel p-4 flex items-center justify-between">
+      <div className="cyber-panel p-4 flex items-start justify-between gap-3">
         <div>
           <div className="text-xl md:text-2xl font-bold bg-gradient-to-r from-cyan-300 to-blue-500 bg-clip-text text-transparent flex items-center gap-2">
             TRD Agent Spawn / Ingest System
           </div>
-          <p className="text-cyan-300/70 text-xs md:text-sm">Topic orchestration map • drag to rotate • scroll to zoom</p>
+          <p className="text-cyan-300/70 text-xs md:text-sm">Topic orchestration map • drag to rotate • drag topic cards to organize • scroll to zoom</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-col md:flex-row gap-2">
+          <button onClick={autoFitLayout} className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-black text-xs font-semibold">
+            Auto-Fit Topics
+          </button>
           <div className="cyber-panel px-4 py-2 text-center">
             <p className="text-xs text-cyan-300/70">Topics</p>
             <p className="text-xl font-bold text-cyan-300">{topics.length}</p>
@@ -99,18 +165,38 @@ export default function AgentRoom3D({
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-4">
         <div className="cyber-panel p-4 relative">
-          <div className={`absolute right-4 top-4 text-xs font-mono ${dragging ? 'opacity-50' : 'opacity-100'} text-cyan-200`}>
+          <div className={`absolute right-4 top-4 text-xs font-mono ${(dragging || draggingTopicId) ? 'opacity-50' : 'opacity-100'} text-cyan-200`}>
             X:{Math.round(sx.get())}° Z:{Math.round(sz.get())}° Zoom:{Math.round(szoom.get() * 100)}%
           </div>
-          <div className="absolute left-4 top-4 text-xs text-cyan-300/70">🎮 Drag to Rotate | 🖱️ Scroll to Zoom</div>
+          <div className="absolute left-4 top-4 text-xs text-cyan-300/70">🎮 Drag to Rotate | 🖱️ Scroll to Zoom | 🧩 Drag topic cards</div>
 
           <div
+            ref={roomRef}
             className="h-[420px] md:h-[600px] rounded-xl overflow-hidden relative cursor-grab active:cursor-grabbing"
             onMouseDown={(e) => {
+              if (draggingTopicId) return;
               setDragging(true);
               dragRef.current = { x: e.clientX, y: e.clientY };
             }}
             onMouseMove={(e) => {
+              if (draggingTopicId) {
+                const rect = roomRef.current?.getBoundingClientRect();
+                if (!rect) return;
+
+                const px = (e.clientX - rect.left) / rect.width;
+                const py = (e.clientY - rect.top) / rect.height;
+
+                const x = clamp(px * ROOM_W, 90, ROOM_W - 90);
+                const y = clamp(py * ROOM_H, 85, ROOM_H - 85);
+
+                setTopicPositions((prev) => {
+                  const next = { ...prev, [draggingTopicId]: { x, y } };
+                  saveLayout(next);
+                  return next;
+                });
+                return;
+              }
+
               if (!dragRef.current) return;
               const dx = e.clientX - dragRef.current.x;
               const dy = e.clientY - dragRef.current.y;
@@ -121,10 +207,12 @@ export default function AgentRoom3D({
             onMouseUp={() => {
               setDragging(false);
               dragRef.current = null;
+              setDraggingTopicId(null);
             }}
             onMouseLeave={() => {
               setDragging(false);
               dragRef.current = null;
+              setDraggingTopicId(null);
             }}
             onWheel={(e) => {
               e.preventDefault();
@@ -151,18 +239,22 @@ export default function AgentRoom3D({
                     topic.state === 'failed'
                       ? '#ef4444'
                       : topic.state === 'complete'
-                      ? '#22c55e'
-                      : topic.state === 'working'
-                      ? '#22c55e'
-                      : '#9ca3af';
+                        ? '#22c55e'
+                        : topic.state === 'working'
+                          ? '#22c55e'
+                          : '#9ca3af';
 
                   return (
                     <motion.div
                       key={topic.id}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 group"
+                      className="absolute -translate-x-1/2 -translate-y-1/2 group cursor-move"
                       style={{ left: topic.position.x, top: topic.position.y, transform: 'translateZ(18px)' }}
                       animate={topic.state === 'working' ? { y: [0, -4, 0] } : { y: 0 }}
                       transition={{ duration: 1.2, repeat: Infinity }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setDraggingTopicId(topic.id);
+                      }}
                     >
                       <div
                         className="w-20 h-20 rounded-xl border-2 flex items-center justify-center"
