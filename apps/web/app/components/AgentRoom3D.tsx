@@ -58,6 +58,25 @@ function createAutoLayout(ids: string[]) {
   return result;
 }
 
+function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function findNonOverlappingPosition(existing: { x: number; y: number }[], candidates: { x: number; y: number }[]) {
+  const minDistance = 95;
+
+  for (const candidate of candidates) {
+    const collides = existing.some((pos) => distance(pos, candidate) < minDistance);
+    if (!collides) return candidate;
+  }
+
+  const fallback = candidates[candidates.length - 1] ?? { x: 140, y: 120 };
+  return {
+    x: clamp(fallback.x + 16, 90, ROOM_W - 90),
+    y: clamp(fallback.y + 16, 85, ROOM_H - 85),
+  };
+}
+
 function loadLayout() {
   try {
     const raw = window.localStorage.getItem(TOPIC_LAYOUT_KEY);
@@ -106,11 +125,20 @@ export default function AgentRoom3D({
     const autoLayout = createAutoLayout(bucketIds);
 
     const merged: TopicPositionMap = {};
-    bucketIds.forEach((id) => {
-      merged[id] = fromStorage[id] ?? autoLayout[id];
-    });
+
+    for (const id of bucketIds) {
+      if (fromStorage[id]) {
+        merged[id] = fromStorage[id];
+        continue;
+      }
+
+      const existing = Object.values(merged);
+      const candidates = Object.values(autoLayout);
+      merged[id] = findNonOverlappingPosition(existing, candidates);
+    }
 
     setTopicPositions(merged);
+    saveLayout(merged);
   }, [buckets]);
 
   useEffect(() => {
@@ -239,7 +267,7 @@ export default function AgentRoom3D({
                 <motion.div
                   key={topic.id}
                   className="absolute -translate-x-1/2 -translate-y-1/2 group cursor-move"
-                  style={{ left: topic.position.x, top: topic.position.y, transform: 'translateZ(18px)' }}
+                  style={{ left: topic.position.x, top: topic.position.y, transform: 'translateZ(18px)', zIndex: 20 + topic.itemCount }}
                   animate={topic.state === 'working' ? { y: [0, -4, 0] } : { y: 0 }}
                   transition={{ duration: 1.2, repeat: Infinity }}
                   onPointerDown={(e) => {
