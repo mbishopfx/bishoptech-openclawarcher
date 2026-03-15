@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useMotionValue, useSpring } from 'framer-motion';
-import { Activity, FolderKanban } from 'lucide-react';
+import { Activity, FolderKanban, Maximize2, Minimize2 } from 'lucide-react';
 import type { AgentLog, Bucket, BucketItem } from './types';
 
 const palette = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
@@ -88,6 +88,7 @@ export default function AgentRoom3D({
   const [dragging, setDragging] = useState(false);
   const [topicPositions, setTopicPositions] = useState<TopicPositionMap>({});
   const [draggingTopicId, setDraggingTopicId] = useState<string | null>(null);
+  const [fullInteractive, setFullInteractive] = useState(false);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
   const roomRef = useRef<HTMLDivElement | null>(null);
 
@@ -111,6 +112,15 @@ export default function AgentRoom3D({
 
     setTopicPositions(merged);
   }, [buckets]);
+
+  useEffect(() => {
+    if (!fullInteractive) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [fullInteractive]);
 
   const topics = useMemo(
     () =>
@@ -139,6 +149,139 @@ export default function AgentRoom3D({
     saveLayout(autoLayout);
   }
 
+  function onPointerDownSurface(clientX: number, clientY: number) {
+    if (draggingTopicId) return;
+    setDragging(true);
+    dragRef.current = { x: clientX, y: clientY };
+  }
+
+  function onPointerMoveSurface(clientX: number, clientY: number) {
+    if (draggingTopicId) {
+      const rect = roomRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const px = (clientX - rect.left) / rect.width;
+      const py = (clientY - rect.top) / rect.height;
+
+      const x = clamp(px * ROOM_W, 90, ROOM_W - 90);
+      const y = clamp(py * ROOM_H, 85, ROOM_H - 85);
+
+      setTopicPositions((prev) => {
+        const next = { ...prev, [draggingTopicId]: { x, y } };
+        saveLayout(next);
+        return next;
+      });
+      return;
+    }
+
+    if (!dragRef.current) return;
+    const dx = clientX - dragRef.current.x;
+    const dy = clientY - dragRef.current.y;
+    rotateX.set(clamp(rotateX.get() + dy * 0.3, 20, 80));
+    rotateZ.set(rotateZ.get() + dx * 0.3);
+    dragRef.current = { x: clientX, y: clientY };
+  }
+
+  function onPointerEndSurface() {
+    setDragging(false);
+    dragRef.current = null;
+    setDraggingTopicId(null);
+  }
+
+  const mapCard = (
+    <div className="cyber-panel p-4 relative h-full">
+      <div className={`absolute right-4 top-4 text-xs font-mono ${(dragging || draggingTopicId) ? 'opacity-50' : 'opacity-100'} text-cyan-200 z-20`}>
+        X:{Math.round(sx.get())}° Z:{Math.round(sz.get())}° Zoom:{Math.round(szoom.get() * 100)}%
+      </div>
+      <div className="absolute left-4 top-4 text-xs text-cyan-300/70 z-20">🎮 Drag/Touch to Rotate | 🤏 Pinch disabled | 🧩 Drag topic cards</div>
+
+      <div
+        ref={roomRef}
+        className="h-[420px] md:h-[600px] rounded-xl overflow-hidden relative cursor-grab active:cursor-grabbing"
+        style={{ perspective: 1500, touchAction: 'none' }}
+        onPointerDown={(e) => onPointerDownSurface(e.clientX, e.clientY)}
+        onPointerMove={(e) => onPointerMoveSurface(e.clientX, e.clientY)}
+        onPointerUp={onPointerEndSurface}
+        onPointerCancel={onPointerEndSurface}
+        onPointerLeave={() => {
+          if (!draggingTopicId) onPointerEndSurface();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+          zoom.set(clamp(zoom.get() - e.deltaY * 0.001, 0.5, 1.5));
+        }}
+      >
+        <motion.div
+          className="absolute inset-0"
+          style={{
+            transformStyle: 'preserve-3d',
+            rotateX: sx,
+            rotateZ: sz,
+            scale: szoom,
+          }}
+        >
+          <div className="absolute left-1/2 top-1/2 w-[900px] h-[600px] -translate-x-1/2 -translate-y-1/2">
+            <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-slate-900 via-black to-slate-900 shadow-[0_30px_80px_rgba(0,0,0,0.9)]" style={{ transform: 'translateZ(-40px)' }} />
+            <div className="absolute inset-0 rounded-2xl grid-floor" style={{ transform: 'translateZ(0px)' }} />
+
+            {topics.map((topic) => {
+              const glow = topic.state === 'working' ? `${topic.color}cc` : `${topic.color}66`;
+              const statusColor =
+                topic.state === 'failed'
+                  ? '#ef4444'
+                  : topic.state === 'complete'
+                    ? '#22c55e'
+                    : topic.state === 'working'
+                      ? '#22c55e'
+                      : '#9ca3af';
+
+              return (
+                <motion.div
+                  key={topic.id}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 group cursor-move"
+                  style={{ left: topic.position.x, top: topic.position.y, transform: 'translateZ(18px)' }}
+                  animate={topic.state === 'working' ? { y: [0, -4, 0] } : { y: 0 }}
+                  transition={{ duration: 1.2, repeat: Infinity }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setDraggingTopicId(topic.id);
+                  }}
+                >
+                  <div
+                    className="w-20 h-20 rounded-xl border-2 flex items-center justify-center"
+                    style={{
+                      borderColor: topic.color,
+                      background: `${topic.color}30`,
+                      boxShadow: `0 0 24px ${glow}`,
+                    }}
+                  >
+                    <FolderKanban size={28} color={topic.color} />
+                  </div>
+
+                  <div className="mt-2 text-[10px] px-2 py-1 rounded bg-black/85 border text-center font-mono min-w-[130px]" style={{ borderColor: topic.color, color: topic.color }}>
+                    {topic.name}
+                  </div>
+
+                  <div className="mt-1 text-[9px] font-mono text-center" style={{ color: statusColor }}>
+                    {topic.state.toUpperCase()} • {topic.itemCount} ITEMS • {topic.pendingCount} PENDING
+                  </div>
+
+                  <div className="hidden group-hover:block absolute -top-24 left-1/2 -translate-x-1/2 w-64 p-2 rounded-md border bg-black/95 text-xs" style={{ borderColor: topic.color }}>
+                    <p className="font-semibold" style={{ color: topic.color }}>
+                      {topic.name}
+                    </p>
+                    <p className="text-cyan-100/90">{topic.latestLog?.summary || topic.description || 'No latest output yet.'}</p>
+                    <p className="text-cyan-300/70 mt-1">Items: {topic.itemCount} • Pending: {topic.pendingCount}</p>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        </motion.div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       <div className="cyber-panel p-4 flex items-start justify-between gap-3">
@@ -152,6 +295,9 @@ export default function AgentRoom3D({
           <button onClick={autoFitLayout} className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-black text-xs font-semibold">
             Auto-Fit Topics
           </button>
+          <button onClick={() => setFullInteractive(true)} className="md:hidden px-3 py-1.5 rounded bg-indigo-500 hover:bg-indigo-400 text-black text-xs font-semibold inline-flex items-center gap-1">
+            <Maximize2 size={14} /> Open Full Interactive
+          </button>
           <div className="cyber-panel px-4 py-2 text-center">
             <p className="text-xs text-cyan-300/70">Topics</p>
             <p className="text-xl font-bold text-cyan-300">{topics.length}</p>
@@ -164,131 +310,7 @@ export default function AgentRoom3D({
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-4">
-        <div className="cyber-panel p-4 relative">
-          <div className={`absolute right-4 top-4 text-xs font-mono ${(dragging || draggingTopicId) ? 'opacity-50' : 'opacity-100'} text-cyan-200`}>
-            X:{Math.round(sx.get())}° Z:{Math.round(sz.get())}° Zoom:{Math.round(szoom.get() * 100)}%
-          </div>
-          <div className="absolute left-4 top-4 text-xs text-cyan-300/70">🎮 Drag to Rotate | 🖱️ Scroll to Zoom | 🧩 Drag topic cards</div>
-
-          <div
-            ref={roomRef}
-            className="h-[420px] md:h-[600px] rounded-xl overflow-hidden relative cursor-grab active:cursor-grabbing"
-            onMouseDown={(e) => {
-              if (draggingTopicId) return;
-              setDragging(true);
-              dragRef.current = { x: e.clientX, y: e.clientY };
-            }}
-            onMouseMove={(e) => {
-              if (draggingTopicId) {
-                const rect = roomRef.current?.getBoundingClientRect();
-                if (!rect) return;
-
-                const px = (e.clientX - rect.left) / rect.width;
-                const py = (e.clientY - rect.top) / rect.height;
-
-                const x = clamp(px * ROOM_W, 90, ROOM_W - 90);
-                const y = clamp(py * ROOM_H, 85, ROOM_H - 85);
-
-                setTopicPositions((prev) => {
-                  const next = { ...prev, [draggingTopicId]: { x, y } };
-                  saveLayout(next);
-                  return next;
-                });
-                return;
-              }
-
-              if (!dragRef.current) return;
-              const dx = e.clientX - dragRef.current.x;
-              const dy = e.clientY - dragRef.current.y;
-              rotateX.set(clamp(rotateX.get() + dy * 0.3, 20, 80));
-              rotateZ.set(rotateZ.get() + dx * 0.3);
-              dragRef.current = { x: e.clientX, y: e.clientY };
-            }}
-            onMouseUp={() => {
-              setDragging(false);
-              dragRef.current = null;
-              setDraggingTopicId(null);
-            }}
-            onMouseLeave={() => {
-              setDragging(false);
-              dragRef.current = null;
-              setDraggingTopicId(null);
-            }}
-            onWheel={(e) => {
-              e.preventDefault();
-              zoom.set(clamp(zoom.get() - e.deltaY * 0.001, 0.5, 1.5));
-            }}
-            style={{ perspective: 1500 }}
-          >
-            <motion.div
-              className="absolute inset-0"
-              style={{
-                transformStyle: 'preserve-3d',
-                rotateX: sx,
-                rotateZ: sz,
-                scale: szoom,
-              }}
-            >
-              <div className="absolute left-1/2 top-1/2 w-[900px] h-[600px] -translate-x-1/2 -translate-y-1/2">
-                <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-slate-900 via-black to-slate-900 shadow-[0_30px_80px_rgba(0,0,0,0.9)]" style={{ transform: 'translateZ(-40px)' }} />
-                <div className="absolute inset-0 rounded-2xl grid-floor" style={{ transform: 'translateZ(0px)' }} />
-
-                {topics.map((topic) => {
-                  const glow = topic.state === 'working' ? `${topic.color}cc` : `${topic.color}66`;
-                  const statusColor =
-                    topic.state === 'failed'
-                      ? '#ef4444'
-                      : topic.state === 'complete'
-                        ? '#22c55e'
-                        : topic.state === 'working'
-                          ? '#22c55e'
-                          : '#9ca3af';
-
-                  return (
-                    <motion.div
-                      key={topic.id}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 group cursor-move"
-                      style={{ left: topic.position.x, top: topic.position.y, transform: 'translateZ(18px)' }}
-                      animate={topic.state === 'working' ? { y: [0, -4, 0] } : { y: 0 }}
-                      transition={{ duration: 1.2, repeat: Infinity }}
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        setDraggingTopicId(topic.id);
-                      }}
-                    >
-                      <div
-                        className="w-20 h-20 rounded-xl border-2 flex items-center justify-center"
-                        style={{
-                          borderColor: topic.color,
-                          background: `${topic.color}30`,
-                          boxShadow: `0 0 24px ${glow}`,
-                        }}
-                      >
-                        <FolderKanban size={28} color={topic.color} />
-                      </div>
-
-                      <div className="mt-2 text-[10px] px-2 py-1 rounded bg-black/85 border text-center font-mono min-w-[130px]" style={{ borderColor: topic.color, color: topic.color }}>
-                        {topic.name}
-                      </div>
-
-                      <div className="mt-1 text-[9px] font-mono text-center" style={{ color: statusColor }}>
-                        {topic.state.toUpperCase()} • {topic.itemCount} ITEMS • {topic.pendingCount} PENDING
-                      </div>
-
-                      <div className="hidden group-hover:block absolute -top-24 left-1/2 -translate-x-1/2 w-64 p-2 rounded-md border bg-black/95 text-xs" style={{ borderColor: topic.color }}>
-                        <p className="font-semibold" style={{ color: topic.color }}>
-                          {topic.name}
-                        </p>
-                        <p className="text-cyan-100/90">{topic.latestLog?.summary || topic.description || 'No latest output yet.'}</p>
-                        <p className="text-cyan-300/70 mt-1">Items: {topic.itemCount} • Pending: {topic.pendingCount}</p>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </div>
-            </motion.div>
-          </div>
-        </div>
+        {mapCard}
 
         <div className="cyber-panel p-4 flex flex-col gap-4">
           <h3 className="text-cyan-300 text-lg font-semibold flex gap-2 items-center">
@@ -315,6 +337,17 @@ export default function AgentRoom3D({
           </div>
         </div>
       </div>
+
+      {fullInteractive && (
+        <div className="fixed inset-0 z-[120] bg-black/95 p-2 sm:p-4">
+          <div className="flex justify-end mb-2">
+            <button onClick={() => setFullInteractive(false)} className="px-3 py-2 rounded bg-rose-500 hover:bg-rose-400 text-black text-xs font-semibold inline-flex items-center gap-1">
+              <Minimize2 size={14} /> Exit Full Interactive
+            </button>
+          </div>
+          <div className="h-[calc(100vh-64px)]">{mapCard}</div>
+        </div>
+      )}
     </div>
   );
 }
