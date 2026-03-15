@@ -4,6 +4,7 @@ import cors from 'cors';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { JSDOM } from 'jsdom';
+import { Readability } from '@mozilla/readability';
 import { marked } from 'marked';
 import { createClient } from '@supabase/supabase-js';
 
@@ -63,10 +64,42 @@ function requireDb(res: express.Response) {
   return true;
 }
 
-async function scrapeToMarkdown(url: string): Promise<string> {
+function normalizeText(value: string | null | undefined) {
+  return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function extractReadableFromHtml(html: string, url: string) {
+  const dom = new JSDOM(html, { url });
+  const doc = dom.window.document;
+
+  const reader = new Readability(doc).parse();
+  const readerTitle = normalizeText(reader?.title);
+  const readerText = normalizeText(reader?.textContent);
+
+  if (readerText.length > 200) {
+    return {
+      title: readerTitle || normalizeText(doc.title) || url,
+      text: readerText,
+      method: 'readability',
+    };
+  }
+
+  doc.querySelectorAll('script,style,noscript,svg,canvas,iframe').forEach((el) => el.remove());
+  const contentRoot = doc.querySelector('main,article,[role="main"],.content,.markdown,.prose,.chat,.conversation') || doc.body;
+  const fallbackText = normalizeText(contentRoot?.textContent);
+
+  return {
+    title: normalizeText(doc.title) || url,
+    text: fallbackText,
+    method: 'dom-fallback',
+  };
+}
+
+async function fetchText(url: string) {
   const res = await fetch(url, {
     headers: {
       'user-agent': 'OpenClaw-Agent-Command-Center/1.0',
+      accept: 'text/html, text/plain, application/xhtml+xml, */*;q=0.8',
     },
   });
 
@@ -74,20 +107,46 @@ async function scrapeToMarkdown(url: string): Promise<string> {
     throw new Error(`Failed to fetch URL (${res.status})`);
   }
 
-  const html = await res.text();
-  const dom = new JSDOM(html);
-  const doc = dom.window.document;
-  const title = doc.title?.trim() || url;
+  return res.text();
+}
 
-  doc.querySelectorAll('script,style,noscript,svg,canvas,iframe').forEach((el) => el.remove());
+async function scrapeToMarkdown(url: string): Promise<string> {
+  let title = url;
+  let text = '';
+  let method = 'none';
 
-  const contentRoot = doc.querySelector('main,article,[role="main"],.content,.markdown,.prose') || doc.body;
-  const text = contentRoot?.textContent
-    ?.replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 30000);
+  try {
+    const html = await fetchText(url);
+    const extracted = extractReadableFromHtml(html, url);
+    title = extracted.title;
+    text = extracted.text;
+    method = extracted.method;
+  } catch (error) {
+    console.warn('Primary extraction failed:', error);
+  }
 
-  const markdown = `# ${title}\n\nSource: ${url}\n\n${text ?? ''}`;
+  // Dynamic page fallback (works for many JS-rendered pages)
+  if (text.length < 700) {
+    try {
+      const readerProxy = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, '')}`;
+      const proxied = await fetchText(readerProxy);
+      const proxiedText = normalizeText(proxied);
+      if (proxiedText.length > text.length) {
+        text = proxiedText;
+        method = 'jina-reader';
+      }
+    } catch (error) {
+      console.warn('Jina reader fallback failed:', error);
+    }
+  }
+
+  if (!text) {
+    text = `Content could not be fully extracted from this share URL at ingest time.\n\nSource URL: ${url}`;
+    method = 'unresolved';
+  }
+
+  const clipped = text.slice(0, 60000);
+  const markdown = `# ${title}\n\nSource: ${url}\n\nExtraction Method: ${method}\n\n${clipped}`;
   return marked.parse(markdown) as string;
 }
 
