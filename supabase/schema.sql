@@ -48,23 +48,53 @@ alter table public.bucket_items enable row level security;
 alter table public.agent_logs enable row level security;
 
 -- Team model: all authenticated users can read/write everything.
-create policy if not exists "agent_buckets_authenticated_full"
-  on public.agent_buckets
-  for all
-  to authenticated
-  using (true)
-  with check (true);
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'agent_buckets'
+      and policyname = 'agent_buckets_authenticated_full'
+  ) then
+    create policy "agent_buckets_authenticated_full"
+      on public.agent_buckets
+      for all
+      to authenticated
+      using (true)
+      with check (true);
+  end if;
+end $$;
 
-create policy if not exists "bucket_items_authenticated_full"
-  on public.bucket_items
-  for all
-  to authenticated
-  using (true)
-  with check (true);
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'bucket_items'
+      and policyname = 'bucket_items_authenticated_full'
+  ) then
+    create policy "bucket_items_authenticated_full"
+      on public.bucket_items
+      for all
+      to authenticated
+      using (true)
+      with check (true);
+  end if;
+end $$;
 
-create policy if not exists "agent_logs_authenticated_full"
-  on public.agent_logs
-  for all
-  to authenticated
-  using (true)
-  with check (true);
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'agent_logs'
+      and policyname = 'agent_logs_authenticated_full'
+  ) then
+    create policy "agent_logs_authenticated_full"
+      on public.agent_logs
+      for all
+      to authenticated
+      using (true)
+      with check (true);
+  end if;
+end $$;
