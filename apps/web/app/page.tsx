@@ -13,11 +13,13 @@ type BeforeInstallPromptEvent = Event & {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
 
-function buildAgentPrompt(bucket: Bucket) {
-  const fetchUrl = `${apiBase}/api/agent/fetch/${bucket.endpoint_key}`;
+function buildAgentPrompt(topicBucket: Bucket, incomingBucket?: Bucket) {
+  const topicFetchUrl = `${apiBase}/api/agent/fetch/${topicBucket.endpoint_key}`;
   const reportUrl = `${apiBase}/api/agent/report`;
+  const incomingEndpointKey = incomingBucket?.endpoint_key ?? '<INCOMING_ENDPOINT_KEY>';
+  const incomingFetchUrl = incomingBucket ? `${apiBase}/api/agent/fetch/${incomingBucket.endpoint_key}` : '<INCOMING_FETCH_URL>';
 
-  return `You are connected to OpenClaw Topic: ${bucket.name}\n\n1) Every run, fetch queued instructions:\nGET ${fetchUrl}\n\n2) Execute the returned items locally in your OpenClaw runtime.\n\n3) Send progress + verbose output back:\nPOST ${reportUrl}\nJSON body:\n{\n  "endpointKey": "${bucket.endpoint_key}",\n  "agentId": "<your-agent-id>",\n  "itemId": "<bucket-item-id-if-present>",\n  "status": "working|complete|failed",\n  "summary": "short status",\n  "output": "full verbose output"\n}\n\nAlways include verbose output so the dashboard incoming stream is complete.`;
+  return `SYSTEM: TRD Agent Spawn / Ingest System — Client OpenClaw Onboarding\n\nYou are setting up this OpenClaw instance for autonomous project execution and centralized reporting.\n\n========================\nASSIGNED STREAMS\n========================\nPrimary topic (work intake): ${topicBucket.name}\nPrimary fetch URL: ${topicFetchUrl}\nPrimary endpoint key: ${topicBucket.endpoint_key}\n\nIncoming stream (control/reporting): ${incomingFetchUrl}\nIncoming endpoint key: ${incomingEndpointKey}\n\nReport URL: ${reportUrl}\n\n========================\nREQUIRED AGENT ID FORMAT\n========================\nSet a permanent agent ID in this format:\n<trd-client-slug>-<machine-slug>-<agent-number>\nExample: acme-macstudio-01\n\nUse this SAME agentId in all report payloads.\n\n========================\nSTEP 1 — BOOTSTRAP REPORT (one-time, immediately)\n========================\nSend a 'complete' report to Incoming with:\n- host / machine name\n- OS + version\n- openclaw status summary\n- runtime model/default model\n- planned cron schedules (worker + heartbeat)\n- this agentId\n\nPOST ${reportUrl}\n{\n  "endpointKey": "${incomingEndpointKey}",\n  "agentId": "<agent-id>",\n  "status": "complete",\n  "summary": "Bootstrap registration report",\n  "output": "<full environment + schedule manifest>",\n  "meta": {\n    "reportType": "bootstrap",\n    "topicEndpointKey": "${topicBucket.endpoint_key}",\n    "incomingEndpointKey": "${incomingEndpointKey}",\n    "workerSchedule": "every 5 minutes",\n    "heartbeatSchedule": "every 15 minutes"\n  }\n}\n\n========================\nSTEP 2 — CREATE CRON JOBS\n========================\nCreate these recurring jobs:\n\nA) WORKER LOOP (every 5 minutes)\n- Fetch queued items from topic endpoint\n- Execute tasks locally\n- For each task lifecycle, report started/working/complete/failed\n- Include verbose output, command traces, and final result summary\n\nB) HEARTBEAT / STATUS LOOP (every 15 minutes)\n- Report liveness to Incoming stream\n- Include current cron schedules, queue depth, last processed item, last error, and current branch/project if active\n\n========================\nSTEP 3 — EXECUTION CONTRACT\n========================\nFor each fetched item:\n1) GET ${topicFetchUrl}\n2) Execute locally in OpenClaw\n3) POST progress to ${reportUrl}\n\nReport payload format:\n{\n  "endpointKey": "${topicBucket.endpoint_key}",\n  "agentId": "<agent-id>",\n  "itemId": "<bucket-item-id-if-present>",\n  "status": "started|working|complete|failed",\n  "summary": "short status update",\n  "output": "full verbose output",\n  "meta": {\n    "schedule": "<cron expression or interval>",\n    "jobType": "worker|heartbeat|manual",\n    "topic": "${topicBucket.name}",\n    "host": "<machine>",\n    "openclawVersion": "<version>"\n  }\n}\n\nAlso post mirrored high-level status updates to Incoming:\n{\n  "endpointKey": "${incomingEndpointKey}",\n  "agentId": "<agent-id>",\n  "status": "working|complete|failed",\n  "summary": "topic progress update",\n  "output": "brief executive + verbose references",\n  "meta": {\n    "reportType": "incoming-mirror",\n    "topicEndpointKey": "${topicBucket.endpoint_key}"\n  }\n}\n\n========================\nNON-NEGOTIABLES\n========================\n- Never skip verbose output\n- Never change agentId once set\n- Always include schedule metadata in reports\n- If cron jobs fail, report failure to Incoming immediately\n- Keep this OpenClaw fully autonomous so no manual follow-up is needed\n`;
 }
 
 export default function Page() {
@@ -277,7 +279,8 @@ export default function Page() {
           <div className="space-y-3 max-h-[620px] overflow-auto pr-1">
             {buckets.map((bucket) => {
               const fetchUrl = `${apiBase}/api/agent/fetch/${bucket.endpoint_key}`;
-              const prompt = buildAgentPrompt(bucket);
+              const incomingBucket = buckets.find((b) => b.name.trim().toLowerCase() === 'incoming');
+              const prompt = buildAgentPrompt(bucket, incomingBucket);
               const itemCount = (itemsByBucket[bucket.id] || []).length;
               const latestLink = (itemsByBucket[bucket.id] || []).find((item) => item.shared_url)?.shared_url;
 
@@ -296,7 +299,7 @@ export default function Page() {
                           await navigator.clipboard.writeText(prompt);
                         }}
                       >
-                        Copy Agent Prompt
+                        Copy Client Setup Prompt
                       </button>
                       <button
                         className="px-2.5 py-1.5 rounded text-xs bg-amber-500 text-black font-semibold"
