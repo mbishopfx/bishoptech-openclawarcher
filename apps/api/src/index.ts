@@ -18,13 +18,12 @@ app.use(
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-}
-
-const db = createClient(supabaseUrl, supabaseKey, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+const db =
+  supabaseUrl && supabaseKey
+    ? createClient(supabaseUrl, supabaseKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      })
+    : null;
 
 const createBucketSchema = z.object({
   name: z.string().min(2),
@@ -48,6 +47,16 @@ const reportSchema = z.object({
   output: z.string().min(1),
   meta: z.record(z.any()).optional(),
 });
+
+function requireDb(res: express.Response) {
+  if (!db) {
+    res.status(503).json({
+      error: 'API is not configured yet. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Railway variables.',
+    });
+    return false;
+  }
+  return true;
+}
 
 async function scrapeToMarkdown(url: string): Promise<string> {
   const res = await fetch(url, {
@@ -73,10 +82,12 @@ async function scrapeToMarkdown(url: string): Promise<string> {
   return marked.parse(markdown) as string;
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, configured: Boolean(db) }));
 
 app.get('/api/buckets', async (_req, res) => {
-  const { data, error } = await db
+  if (!requireDb(res)) return;
+  const dbClient = db!;
+  const { data, error } = await dbClient
     .from('agent_buckets')
     .select('*')
     .order('created_at', { ascending: false });
@@ -86,11 +97,13 @@ app.get('/api/buckets', async (_req, res) => {
 });
 
 app.post('/api/buckets', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
   const parsed = createBucketSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   const endpointKey = `oc_${nanoid(18)}`;
-  const { data, error } = await db
+  const { data, error } = await dbClient
     .from('agent_buckets')
     .insert({ ...parsed.data, endpoint_key: endpointKey })
     .select('*')
@@ -101,6 +114,8 @@ app.post('/api/buckets', async (req, res) => {
 });
 
 app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
   const bucketId = req.params.bucketId;
   const parsed = ingestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -115,7 +130,7 @@ app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
     normalized = await scrapeToMarkdown(parsed.data.sharedUrl);
   }
 
-  const { data, error } = await db
+  const { data, error } = await dbClient
     .from('bucket_items')
     .insert({
       bucket_id: bucketId,
@@ -134,9 +149,11 @@ app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
 });
 
 app.get('/api/agent/fetch/:endpointKey', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
   const endpointKey = req.params.endpointKey;
 
-  const { data: bucket, error: bucketError } = await db
+  const { data: bucket, error: bucketError } = await dbClient
     .from('agent_buckets')
     .select('*')
     .eq('endpoint_key', endpointKey)
@@ -144,7 +161,7 @@ app.get('/api/agent/fetch/:endpointKey', async (req, res) => {
 
   if (bucketError || !bucket) return res.status(404).json({ error: 'Bucket endpoint not found' });
 
-  const { data: items, error: itemsError } = await db
+  const { data: items, error: itemsError } = await dbClient
     .from('bucket_items')
     .select('*')
     .eq('bucket_id', bucket.id)
@@ -157,12 +174,14 @@ app.get('/api/agent/fetch/:endpointKey', async (req, res) => {
 });
 
 app.post('/api/agent/report', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
   const parsed = reportSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   const { endpointKey, itemId, status, output, agentId, summary, meta } = parsed.data;
 
-  const { data: bucket, error: bucketError } = await db
+  const { data: bucket, error: bucketError } = await dbClient
     .from('agent_buckets')
     .select('*')
     .eq('endpoint_key', endpointKey)
@@ -171,7 +190,7 @@ app.post('/api/agent/report', async (req, res) => {
   if (bucketError || !bucket) return res.status(404).json({ error: 'Bucket endpoint not found' });
 
   if (itemId) {
-    const { error: itemErr } = await db
+    const { error: itemErr } = await dbClient
       .from('bucket_items')
       .update({
         status: status === 'failed' ? 'failed' : status === 'complete' ? 'done' : 'in_progress',
@@ -183,7 +202,7 @@ app.post('/api/agent/report', async (req, res) => {
     if (itemErr) return res.status(500).json({ error: itemErr.message });
   }
 
-  const { data, error } = await db
+  const { data, error } = await dbClient
     .from('agent_logs')
     .insert({
       bucket_id: bucket.id,
@@ -202,8 +221,10 @@ app.post('/api/agent/report', async (req, res) => {
 });
 
 app.get('/api/logs', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
   const bucketId = req.query.bucketId as string | undefined;
-  let query = db.from('agent_logs').select('*').order('created_at', { ascending: false }).limit(100);
+  let query = dbClient.from('agent_logs').select('*').order('created_at', { ascending: false }).limit(100);
   if (bucketId) query = query.eq('bucket_id', bucketId);
 
   const { data, error } = await query;
