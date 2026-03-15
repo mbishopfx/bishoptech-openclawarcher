@@ -29,3 +29,15 @@ export interface AgentLog {
   output: string;
   created_at: string;
 }
+
+export interface BucketItem {
+  id: string;
+  bucket_id: string;
+  title?: string | null;
+  source: string;
+  shared_url?: string | null;
+  raw_text?: string | null;
+  normalized_text: string;
+  status: 'queued' | 'in_progress' | 'done' | 'failed';
+  created_at: string;
+}

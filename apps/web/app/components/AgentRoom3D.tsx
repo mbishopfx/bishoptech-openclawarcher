@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { motion, useMotionValue, useSpring } from 'framer-motion';
 import { Activity, FolderKanban } from 'lucide-react';
-import type { AgentLog, Bucket } from './types';
+import type { AgentLog, Bucket, BucketItem } from './types';
 
 const stationPositions = [
   { x: 150, y: 150 },
@@ -22,18 +22,29 @@ function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
 }
 
-function topicStateForBucket(bucket: Bucket, logs: AgentLog[]): TopicState {
+function topicStateForBucket(bucket: Bucket, logs: AgentLog[], items: BucketItem[]): TopicState {
+  if (items.some((item) => item.status === 'queued' || item.status === 'in_progress')) return 'working';
+  if (items.some((item) => item.status === 'failed')) return 'failed';
+
   const latest = logs.find((log) => log.bucket_id === bucket.id);
-  if (!latest) return 'idle';
+  if (!latest) return items.some((item) => item.status === 'done') ? 'complete' : 'idle';
   if (latest.status === 'failed') return 'failed';
   if (latest.status === 'complete') return 'complete';
 
   const recentMs = Date.now() - new Date(latest.created_at).getTime();
   if (recentMs < 10 * 60 * 1000) return 'working';
-  return 'idle';
+  return items.some((item) => item.status === 'done') ? 'complete' : 'idle';
 }
 
-export default function AgentRoom3D({ buckets, logs }: { buckets: Bucket[]; logs: AgentLog[] }) {
+export default function AgentRoom3D({
+  buckets,
+  logs,
+  itemsByBucket,
+}: {
+  buckets: Bucket[];
+  logs: AgentLog[];
+  itemsByBucket: Record<string, BucketItem[]>;
+}) {
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -47,14 +58,19 @@ export default function AgentRoom3D({ buckets, logs }: { buckets: Bucket[]; logs
 
   const topics = useMemo(
     () =>
-      buckets.slice(0, 6).map((bucket, idx) => ({
-        ...bucket,
-        color: bucket.color || palette[idx % palette.length],
-        position: stationPositions[idx],
-        state: topicStateForBucket(bucket, logs),
-        latestLog: logs.find((log) => log.bucket_id === bucket.id),
-      })),
-    [buckets, logs],
+      buckets.slice(0, 6).map((bucket, idx) => {
+        const bucketItems = itemsByBucket[bucket.id] || [];
+        return {
+          ...bucket,
+          color: bucket.color || palette[idx % palette.length],
+          position: stationPositions[idx],
+          state: topicStateForBucket(bucket, logs, bucketItems),
+          latestLog: logs.find((log) => log.bucket_id === bucket.id),
+          itemCount: bucketItems.length,
+          pendingCount: bucketItems.filter((i) => i.status === 'queued' || i.status === 'in_progress').length,
+        };
+      }),
+    [buckets, logs, itemsByBucket],
   );
 
   const workingCount = topics.filter((t) => t.state === 'working').length;
@@ -164,7 +180,7 @@ export default function AgentRoom3D({ buckets, logs }: { buckets: Bucket[]; logs
                       </div>
 
                       <div className="mt-1 text-[9px] font-mono text-center" style={{ color: statusColor }}>
-                        {topic.state.toUpperCase()}
+                        {topic.state.toUpperCase()} • {topic.itemCount} ITEMS • {topic.pendingCount} PENDING
                       </div>
 
                       <div className="hidden group-hover:block absolute -top-24 left-1/2 -translate-x-1/2 w-64 p-2 rounded-md border bg-black/95 text-xs" style={{ borderColor: topic.color }}>
@@ -172,6 +188,7 @@ export default function AgentRoom3D({ buckets, logs }: { buckets: Bucket[]; logs
                           {topic.name}
                         </p>
                         <p className="text-cyan-100/90">{topic.latestLog?.summary || topic.description || 'No latest output yet.'}</p>
+                        <p className="text-cyan-300/70 mt-1">Items: {topic.itemCount} • Pending: {topic.pendingCount}</p>
                       </div>
                     </motion.div>
                   );

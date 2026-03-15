@@ -48,6 +48,11 @@ const reportSchema = z.object({
   meta: z.record(z.any()).optional(),
 });
 
+const idParamSchema = z.object({
+  bucketId: z.string().uuid().optional(),
+  itemId: z.string().uuid().optional(),
+});
+
 function requireDb(res: express.Response) {
   if (!db) {
     res.status(503).json({
@@ -71,12 +76,16 @@ async function scrapeToMarkdown(url: string): Promise<string> {
 
   const html = await res.text();
   const dom = new JSDOM(html);
-  const title = dom.window.document.title?.trim() || url;
+  const doc = dom.window.document;
+  const title = doc.title?.trim() || url;
 
-  const text = dom.window.document.body?.textContent
+  doc.querySelectorAll('script,style,noscript,svg,canvas,iframe').forEach((el) => el.remove());
+
+  const contentRoot = doc.querySelector('main,article,[role="main"],.content,.markdown,.prose') || doc.body;
+  const text = contentRoot?.textContent
     ?.replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 45000);
+    .slice(0, 30000);
 
   const markdown = `# ${title}\n\nSource: ${url}\n\n${text ?? ''}`;
   return marked.parse(markdown) as string;
@@ -111,6 +120,45 @@ app.post('/api/buckets', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   return res.status(201).json(data);
+});
+
+app.get('/api/buckets/:bucketId/items', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
+
+  const parsedParams = idParamSchema.safeParse(req.params);
+  if (!parsedParams.success || !parsedParams.data.bucketId) {
+    return res.status(400).json({ error: 'Invalid bucketId' });
+  }
+
+  const { data, error } = await dbClient
+    .from('bucket_items')
+    .select('*')
+    .eq('bucket_id', parsedParams.data.bucketId)
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data);
+});
+
+app.delete('/api/bucket-items/:itemId', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
+
+  const parsedParams = idParamSchema.safeParse(req.params);
+  if (!parsedParams.success || !parsedParams.data.itemId) {
+    return res.status(400).json({ error: 'Invalid itemId' });
+  }
+
+  const itemId = parsedParams.data.itemId;
+
+  const { error: logsError } = await dbClient.from('agent_logs').delete().eq('bucket_item_id', itemId);
+  if (logsError) return res.status(500).json({ error: logsError.message });
+
+  const { error } = await dbClient.from('bucket_items').delete().eq('id', itemId);
+  if (error) return res.status(500).json({ error: error.message });
+
+  return res.status(204).send();
 });
 
 app.post('/api/buckets/:bucketId/ingest', async (req, res) => {

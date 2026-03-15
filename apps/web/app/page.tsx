@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import AgentRoom3D from './components/AgentRoom3D';
-import type { AgentLog, Bucket } from './components/types';
+import type { AgentLog, Bucket, BucketItem } from './components/types';
 
 type Tab = 'topics' | 'endpoints' | 'verbose';
 
@@ -20,6 +20,7 @@ export default function Page() {
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
   const [logs, setLogs] = useState<AgentLog[]>([]);
+  const [itemsByBucket, setItemsByBucket] = useState<Record<string, BucketItem[]>>({});
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [rawText, setRawText] = useState('');
@@ -27,33 +28,64 @@ export default function Page() {
 
   async function loadBuckets() {
     const res = await fetch(`${apiBase}/api/buckets`);
-    const data = await res.json();
+    const data: Bucket[] = await res.json();
     setBuckets(data);
     if (!selectedBucket && data[0]) setSelectedBucket(data[0].id);
+    return data;
   }
 
   async function loadLogs(bucketId?: string | null) {
     const qp = bucketId ? `?bucketId=${bucketId}` : '';
     const res = await fetch(`${apiBase}/api/logs${qp}`);
-    const data = await res.json();
+    const data: AgentLog[] = await res.json();
     setLogs(data);
   }
 
+  async function loadItemsForBucket(bucketId: string) {
+    const res = await fetch(`${apiBase}/api/buckets/${bucketId}/items`);
+    const data: BucketItem[] = await res.json();
+    setItemsByBucket((prev) => ({ ...prev, [bucketId]: data }));
+    return data;
+  }
+
+  async function loadAllItems(bucketList: Bucket[]) {
+    const entries = await Promise.all(
+      bucketList.map(async (bucket) => {
+        const res = await fetch(`${apiBase}/api/buckets/${bucket.id}/items`);
+        const data: BucketItem[] = await res.json();
+        return [bucket.id, data] as const;
+      }),
+    );
+
+    setItemsByBucket(Object.fromEntries(entries));
+  }
+
   useEffect(() => {
-    loadBuckets();
+    (async () => {
+      const bucketList = await loadBuckets();
+      await loadAllItems(bucketList);
+    })();
   }, []);
 
   useEffect(() => {
     loadLogs(selectedBucket);
-    const timer = setInterval(() => loadLogs(selectedBucket), 5 * 60 * 1000);
+    if (selectedBucket) loadItemsForBucket(selectedBucket);
+
+    const timer = setInterval(async () => {
+      await loadLogs(selectedBucket);
+      const currentBuckets = await loadBuckets();
+      await loadAllItems(currentBuckets);
+    }, 5 * 60 * 1000);
+
     return () => clearInterval(timer);
   }, [selectedBucket]);
 
   const current = useMemo(() => buckets.find((b) => b.id === selectedBucket) ?? null, [buckets, selectedBucket]);
+  const currentItems = current ? itemsByBucket[current.id] || [] : [];
 
   return (
     <main className="min-h-screen p-6 space-y-6">
-      <AgentRoom3D buckets={buckets} logs={logs} />
+      <AgentRoom3D buckets={buckets} logs={logs} itemsByBucket={itemsByBucket} />
 
       <section className="cyber-panel p-3 flex gap-2 w-fit">
         <button className={`px-3 py-1.5 rounded text-sm ${tab === 'topics' ? 'bg-cyan-600 text-black font-semibold' : 'bg-black/50 text-cyan-200'}`} onClick={() => setTab('topics')}>Topics</button>
@@ -84,7 +116,8 @@ export default function Page() {
                   });
                   setName('');
                   setDescription('');
-                  await loadBuckets();
+                  const bucketList = await loadBuckets();
+                  await loadAllItems(bucketList);
                   setTab('endpoints');
                 }}
               >
@@ -121,10 +154,53 @@ export default function Page() {
                 setRawText('');
                 setSharedUrl('');
                 await loadLogs(current.id);
+                await loadItemsForBucket(current.id);
               }}
             >
               Queue for Topic
             </button>
+          </div>
+
+          <div className="cyber-panel p-4 space-y-3 xl:col-span-2">
+            <h2 className="text-lg font-semibold text-cyan-300">Topic Inventory</h2>
+            <p className="text-xs text-cyan-300/70">View what was ingested in the selected topic and delete items when a project is done.</p>
+
+            {!current ? (
+              <p className="text-xs text-cyan-200/60">Select a topic to view inventory.</p>
+            ) : currentItems.length === 0 ? (
+              <p className="text-xs text-cyan-200/60">No items yet in {current.name}.</p>
+            ) : (
+              <div className="space-y-2 max-h-[420px] overflow-auto">
+                {currentItems.map((item) => (
+                  <div key={item.id} className="border border-cyan-500/25 rounded-lg p-3 bg-black/50">
+                    <div className="flex justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-mono text-cyan-100">{item.source.toUpperCase()} • {item.status}</p>
+                        <p className="text-[11px] text-cyan-300/60">{new Date(item.created_at).toLocaleString()}</p>
+                        {item.shared_url && (
+                          <a href={item.shared_url} target="_blank" rel="noreferrer" className="text-[11px] text-cyan-300 underline break-all">
+                            {item.shared_url}
+                          </a>
+                        )}
+                        {!item.shared_url && item.raw_text && (
+                          <p className="text-xs text-cyan-200/80 mt-1 whitespace-pre-wrap">{item.raw_text.slice(0, 220)}{item.raw_text.length > 220 ? '…' : ''}</p>
+                        )}
+                      </div>
+                      <button
+                        className="h-fit px-2.5 py-1.5 rounded text-xs bg-rose-500/90 hover:bg-rose-400 text-black font-semibold"
+                        onClick={async () => {
+                          await fetch(`${apiBase}/api/bucket-items/${item.id}`, { method: 'DELETE' });
+                          if (current) await loadItemsForBucket(current.id);
+                          await loadLogs(current?.id);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       )}
@@ -138,13 +214,16 @@ export default function Page() {
             {buckets.map((bucket) => {
               const fetchUrl = `${apiBase}/api/agent/fetch/${bucket.endpoint_key}`;
               const prompt = buildAgentPrompt(bucket);
+              const itemCount = (itemsByBucket[bucket.id] || []).length;
+              const latestLink = (itemsByBucket[bucket.id] || []).find((item) => item.shared_url)?.shared_url;
 
               return (
                 <div key={bucket.id} className="border border-cyan-500/25 rounded-lg p-3 bg-black/50 space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-cyan-100 font-medium">{bucket.name}</p>
                       <p className="text-xs text-cyan-300/60">{bucket.description || 'No description'}</p>
+                      <p className="text-xs text-cyan-200/70">Items in topic: {itemCount}</p>
                     </div>
                     <button
                       className="px-2.5 py-1.5 rounded text-xs bg-cyan-600 text-black font-semibold"
@@ -155,6 +234,10 @@ export default function Page() {
                       Copy Agent Prompt
                     </button>
                   </div>
+
+                  {latestLink && (
+                    <p className="text-[11px] text-cyan-300/80 break-all">Latest ingested link: {latestLink}</p>
+                  )}
 
                   <div className="text-xs font-mono text-cyan-200/90 space-y-1">
                     <p>Fetch URL</p>
