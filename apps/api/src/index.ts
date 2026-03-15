@@ -220,6 +220,28 @@ app.delete('/api/bucket-items/:itemId', async (req, res) => {
   return res.status(204).send();
 });
 
+app.post('/api/buckets/:bucketId/rotate-endpoint', async (req, res) => {
+  if (!requireDb(res)) return;
+  const dbClient = db!;
+
+  const parsedParams = idParamSchema.safeParse(req.params);
+  if (!parsedParams.success || !parsedParams.data.bucketId) {
+    return res.status(400).json({ error: 'Invalid bucketId' });
+  }
+
+  const newEndpointKey = `oc_${nanoid(18)}`;
+
+  const { data, error } = await dbClient
+    .from('agent_buckets')
+    .update({ endpoint_key: newEndpointKey })
+    .eq('id', parsedParams.data.bucketId)
+    .select('*')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json(data);
+});
+
 app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
   if (!requireDb(res)) return;
   const dbClient = db!;

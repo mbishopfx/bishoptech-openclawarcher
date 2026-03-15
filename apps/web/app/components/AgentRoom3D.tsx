@@ -80,10 +80,10 @@ export default function AgentRoom3D({
     <div className="space-y-4">
       <div className="cyber-panel p-4 flex items-center justify-between">
         <div>
-          <div className="text-2xl font-bold bg-gradient-to-r from-cyan-300 to-blue-500 bg-clip-text text-transparent flex items-center gap-2">
-            OpenClaw Topic Command Center - 3D View
+          <div className="text-xl md:text-2xl font-bold bg-gradient-to-r from-cyan-300 to-blue-500 bg-clip-text text-transparent flex items-center gap-2">
+            TRD Agent Spawn / Ingest System
           </div>
-          <p className="text-cyan-300/70 text-sm">Topic orchestration map • drag to rotate • scroll to zoom</p>
+          <p className="text-cyan-300/70 text-xs md:text-sm">Topic orchestration map • drag to rotate • scroll to zoom</p>
         </div>
         <div className="flex gap-3">
           <div className="cyber-panel px-4 py-2 text-center">
@@ -105,7 +105,7 @@ export default function AgentRoom3D({
           <div className="absolute left-4 top-4 text-xs text-cyan-300/70">🎮 Drag to Rotate | 🖱️ Scroll to Zoom</div>
 
           <div
-            className="h-[600px] rounded-xl overflow-hidden relative cursor-grab active:cursor-grabbing"
+            className="h-[420px] md:h-[600px] rounded-xl overflow-hidden relative cursor-grab active:cursor-grabbing"
             onMouseDown={(e) => {
               setDragging(true);
               dragRef.current = { x: e.clientX, y: e.clientY };

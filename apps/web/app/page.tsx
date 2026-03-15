@@ -6,6 +6,11 @@ import type { AgentLog, Bucket, BucketItem } from './components/types';
 
 type Tab = 'topics' | 'endpoints' | 'verbose';
 
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+};
+
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
 
 function buildAgentPrompt(bucket: Bucket) {
@@ -25,6 +30,9 @@ export default function Page() {
   const [description, setDescription] = useState('');
   const [rawText, setRawText] = useState('');
   const [sharedUrl, setSharedUrl] = useState('');
+  const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isIos, setIsIos] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
 
   async function loadBuckets() {
     const res = await fetch(`${apiBase}/api/buckets`);
@@ -68,6 +76,24 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => null);
+    }
+
+    const ios = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
+    setIsIos(ios);
+    setIsStandalone(window.matchMedia('(display-mode: standalone)').matches || (window.navigator as Navigator & { standalone?: boolean }).standalone === true);
+
+    const handler = (event: Event) => {
+      event.preventDefault();
+      setInstallPromptEvent(event as BeforeInstallPromptEvent);
+    };
+
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  useEffect(() => {
     loadLogs(selectedBucket);
     if (selectedBucket) loadItemsForBucket(selectedBucket);
 
@@ -83,8 +109,40 @@ export default function Page() {
   const current = useMemo(() => buckets.find((b) => b.id === selectedBucket) ?? null, [buckets, selectedBucket]);
   const currentItems = current ? itemsByBucket[current.id] || [] : [];
 
+  async function handleInstallApp() {
+    if (installPromptEvent) {
+      await installPromptEvent.prompt();
+      await installPromptEvent.userChoice;
+      setInstallPromptEvent(null);
+      return;
+    }
+
+    if (isIos && !isStandalone) {
+      window.alert('On iPhone: tap Share, then "Add to Home Screen".');
+      return;
+    }
+
+    window.alert('Install prompt not available yet. On Android/desktop, open browser menu and choose "Install app".');
+  }
+
   return (
-    <main className="min-h-screen p-6 space-y-6">
+    <main className="min-h-screen p-3 md:p-6 space-y-4 md:space-y-6">
+      <header className="cyber-panel p-3 md:p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <img src="/trdlogoblue.webp" alt="TRD logo" className="h-10 w-10 rounded object-cover border border-cyan-500/30" />
+          <div className="min-w-0">
+            <h1 className="text-cyan-100 font-semibold text-sm md:text-base truncate">TRD Agent Spawn / Ingest System</h1>
+            <p className="text-cyan-300/70 text-[11px] md:text-xs">Mobile-ready command center for cross-machine OpenClaw orchestration</p>
+          </div>
+        </div>
+        <button
+          className="px-3 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-black font-semibold text-xs md:text-sm whitespace-nowrap"
+          onClick={handleInstallApp}
+        >
+          Install Mobile App
+        </button>
+      </header>
+
       <AgentRoom3D buckets={buckets} logs={logs} itemsByBucket={itemsByBucket} />
 
       <section className="cyber-panel p-3 flex gap-2 w-fit">
@@ -178,6 +236,12 @@ export default function Page() {
                         <p className="text-xs font-mono text-cyan-100">{item.source.toUpperCase()} • {item.status}</p>
                         <p className="text-[11px] text-cyan-300/60">{new Date(item.created_at).toLocaleString()}</p>
                         {item.shared_url && (
+                          <p className="text-[11px] text-cyan-200/80">
+                            Extraction quality:{' '}
+                            {item.normalized_text.length > 3000 ? 'high' : item.normalized_text.length > 700 ? 'medium' : 'low'}
+                          </p>
+                        )}
+                        {item.shared_url && (
                           <a href={item.shared_url} target="_blank" rel="noreferrer" className="text-[11px] text-cyan-300 underline break-all">
                             {item.shared_url}
                           </a>
@@ -219,20 +283,34 @@ export default function Page() {
 
               return (
                 <div key={bucket.id} className="border border-cyan-500/25 rounded-lg p-3 bg-black/50 space-y-2">
-                  <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-cyan-100 font-medium">{bucket.name}</p>
                       <p className="text-xs text-cyan-300/60">{bucket.description || 'No description'}</p>
                       <p className="text-xs text-cyan-200/70">Items in topic: {itemCount}</p>
                     </div>
-                    <button
-                      className="px-2.5 py-1.5 rounded text-xs bg-cyan-600 text-black font-semibold"
-                      onClick={async () => {
-                        await navigator.clipboard.writeText(prompt);
-                      }}
-                    >
-                      Copy Agent Prompt
-                    </button>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        className="px-2.5 py-1.5 rounded text-xs bg-cyan-600 text-black font-semibold"
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(prompt);
+                        }}
+                      >
+                        Copy Agent Prompt
+                      </button>
+                      <button
+                        className="px-2.5 py-1.5 rounded text-xs bg-amber-500 text-black font-semibold"
+                        onClick={async () => {
+                          const ok = window.confirm(`Rotate endpoint key for ${bucket.name}? Old agents will lose access until updated.`);
+                          if (!ok) return;
+                          await fetch(`${apiBase}/api/buckets/${bucket.id}/rotate-endpoint`, { method: 'POST' });
+                          const bucketList = await loadBuckets();
+                          await loadAllItems(bucketList);
+                        }}
+                      >
+                        Rotate Endpoint Key
+                      </button>
+                    </div>
                   </div>
 
                   {latestLink && (
