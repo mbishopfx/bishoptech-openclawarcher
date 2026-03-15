@@ -187,11 +187,29 @@ export default function Page() {
 
             <div className="space-y-2 max-h-[320px] overflow-auto">
               {buckets.map((b) => (
-                <button key={b.id} onClick={() => setSelectedBucket(b.id)} className={`w-full text-left p-3 rounded border ${selectedBucket === b.id ? 'border-cyan-300 bg-cyan-900/30' : 'border-cyan-500/20 bg-black/40'}`}>
-                  <p className="font-medium text-cyan-100">{b.name}</p>
-                  <p className="text-xs text-cyan-300/60">{b.description || 'No description'}</p>
-                  <p className="text-[11px] mt-1 text-cyan-200/70 font-mono">Endpoint Key: {b.endpoint_key}</p>
-                </button>
+                <div key={b.id} className={`w-full p-3 rounded border ${selectedBucket === b.id ? 'border-cyan-300 bg-cyan-900/30' : 'border-cyan-500/20 bg-black/40'}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <button onClick={() => setSelectedBucket(b.id)} className="text-left flex-1">
+                      <p className="font-medium text-cyan-100">{b.name}</p>
+                      <p className="text-xs text-cyan-300/60">{b.description || 'No description'}</p>
+                      <p className="text-[11px] mt-1 text-cyan-200/70 font-mono">Endpoint Key: {b.endpoint_key}</p>
+                    </button>
+                    <button
+                      className="px-2.5 py-1.5 rounded text-xs bg-rose-500/90 hover:bg-rose-400 text-black font-semibold"
+                      onClick={async () => {
+                        const ok = window.confirm(`Delete topic \"${b.name}\"? This removes its queued items and logs.`);
+                        if (!ok) return;
+                        await fetch(`${apiBase}/api/buckets/${b.id}`, { method: 'DELETE' });
+                        if (selectedBucket === b.id) setSelectedBucket(null);
+                        const bucketList = await loadBuckets();
+                        await loadAllItems(bucketList);
+                        await loadLogs(bucketList[0]?.id ?? null);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
