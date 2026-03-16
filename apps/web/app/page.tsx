@@ -32,6 +32,8 @@ export default function Page() {
   const [description, setDescription] = useState('');
   const [rawText, setRawText] = useState('');
   const [sharedUrl, setSharedUrl] = useState('');
+  const [isIngesting, setIsIngesting] = useState(false);
+  const [ingestNotice, setIngestNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isIos, setIsIos] = useState(false);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -217,25 +219,62 @@ export default function Page() {
           <div className="cyber-panel p-4 space-y-3">
             <h2 className="text-lg font-semibold text-cyan-300">Ingest Content</h2>
             <p className="text-xs text-cyan-300/70">Paste shared Grok/Gemini/ChatGPT URL or raw notes. OpenClaw agents will fetch from this topic endpoint.</p>
-            <input className="w-full bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm" placeholder="Shared chat URL" value={sharedUrl} onChange={(e) => setSharedUrl(e.target.value)} />
-            <textarea className="w-full h-44 bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm" placeholder="Raw text notes, corrections, requirements..." value={rawText} onChange={(e) => setRawText(e.target.value)} />
+            <input
+              className="w-full bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
+              placeholder="Shared chat URL"
+              value={sharedUrl}
+              onChange={(e) => setSharedUrl(e.target.value)}
+              disabled={isIngesting}
+            />
+            <textarea
+              className="w-full h-44 bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
+              placeholder="Raw text notes, corrections, requirements..."
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              disabled={isIngesting}
+            />
             <button
-              className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-sm"
-              disabled={!current}
+              className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
+              disabled={!current || isIngesting}
               onClick={async () => {
-                if (!current) return;
-                await fetch(`${apiBase}/api/buckets/${current.id}/ingest`, {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ text: rawText || undefined, sharedUrl: sharedUrl || undefined, source: 'manual' }),
-                });
-                setRawText('');
-                setSharedUrl('');
-                await loadLogs(current.id);
-                await loadItemsForBucket(current.id);
+                if (!current || isIngesting) return;
+                setIsIngesting(true);
+
+                try {
+                  const linkValue = sharedUrl.trim();
+                  const textValue = rawText.trim();
+
+                  const response = await fetch(`${apiBase}/api/buckets/${current.id}/ingest`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ text: textValue || undefined, sharedUrl: linkValue || undefined, source: 'manual' }),
+                  });
+
+                  if (!response.ok) {
+                    throw new Error(`Ingest failed (${response.status})`);
+                  }
+
+                  setRawText('');
+                  setSharedUrl('');
+                  await loadLogs(current.id);
+                  await loadItemsForBucket(current.id);
+
+                  setIngestNotice({
+                    type: 'success',
+                    message: linkValue
+                      ? 'Link successfully ingested and queued for this topic.'
+                      : 'Content successfully queued for this topic.',
+                  });
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : 'Ingest failed.';
+                  setIngestNotice({ type: 'error', message });
+                } finally {
+                  setIsIngesting(false);
+                }
               }}
             >
-              Queue for Topic
+              {isIngesting && <span className="h-4 w-4 rounded-full border-2 border-black/40 border-t-black animate-spin" aria-hidden="true" />}
+              {isIngesting ? 'Ingesting…' : 'Queue for Topic'}
             </button>
           </div>
 
@@ -371,6 +410,40 @@ export default function Page() {
             )}
           </div>
         </section>
+      )}
+
+      {isIngesting && (
+        <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center px-4">
+          <div className="cyber-panel p-5 max-w-sm w-full text-center space-y-3">
+            <div className="mx-auto h-10 w-10 rounded-full border-4 border-cyan-500/30 border-t-cyan-300 animate-spin" aria-hidden="true" />
+            <p className="text-cyan-100 font-semibold">Ingesting content…</p>
+            <p className="text-xs text-cyan-300/75">Please keep this page open until ingest completes.</p>
+          </div>
+        </div>
+      )}
+
+      {ingestNotice && (
+        <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-center justify-center px-4">
+          <div
+            className={`cyber-panel p-5 max-w-md w-full space-y-3 border ${ingestNotice.type === 'success' ? 'border-emerald-400/60' : 'border-rose-400/60'}`}
+            role="dialog"
+            aria-modal="true"
+            aria-live="polite"
+          >
+            <p className={`text-base font-semibold ${ingestNotice.type === 'success' ? 'text-emerald-300' : 'text-rose-300'}`}>
+              {ingestNotice.type === 'success' ? 'Ingest complete' : 'Ingest error'}
+            </p>
+            <p className="text-sm text-cyan-100/90">{ingestNotice.message}</p>
+            <div className="flex justify-end">
+              <button
+                className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-black font-semibold text-sm"
+                onClick={() => setIngestNotice(null)}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );
