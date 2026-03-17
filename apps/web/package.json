@@ -1,5 +1,5 @@
 {
-  "name": "@bishoptech/web",
+  "name": "@trd-aiblitz/web",
   "private": true,
   "scripts": {
     "dev": "next dev",
