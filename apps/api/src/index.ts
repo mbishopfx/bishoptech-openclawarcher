@@ -6,6 +6,9 @@ import { nanoid } from 'nanoid';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { createClient } from '@supabase/supabase-js';
+import multer from 'multer';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -24,6 +27,11 @@ const db =
         auth: { persistSession: false, autoRefreshToken: false },
       })
     : null;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
 
 const createBucketSchema = z.object({
   name: z.string().min(2),
@@ -116,6 +124,48 @@ function asSimpleText(value: string | null | undefined) {
     return normalizeText(dom.window.document.body.textContent);
   }
   return normalizeText(raw);
+}
+
+function getFileExtension(name: string | undefined) {
+  if (!name) return '';
+  const idx = name.lastIndexOf('.');
+  if (idx < 0) return '';
+  return name.slice(idx).toLowerCase();
+}
+
+async function extractTextFromUpload(file: Express.Multer.File) {
+  const ext = getFileExtension(file.originalname);
+  const mime = file.mimetype;
+
+  if (mime === 'application/pdf' || ext === '.pdf') {
+    const parser = new PDFParse({ data: file.buffer });
+    try {
+      const parsed = await parser.getText();
+      const text = normalizeText(parsed.text);
+      if (!text) throw new Error('PDF text extraction returned empty content');
+      return text;
+    } finally {
+      await parser.destroy();
+    }
+  }
+
+  if (
+    mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    ext === '.docx'
+  ) {
+    const result = await mammoth.extractRawText({ buffer: file.buffer });
+    const text = normalizeText(result.value);
+    if (!text) throw new Error('DOCX text extraction returned empty content');
+    return text;
+  }
+
+  if (mime === 'application/msword' || ext === '.doc') {
+    const bestEffort = normalizeText(file.buffer.toString('latin1').replace(/\u0000/g, ' '));
+    if (!bestEffort) throw new Error('DOC extraction returned empty content');
+    return bestEffort;
+  }
+
+  throw new Error('Unsupported file type. Upload PDF, DOC, or DOCX.');
 }
 
 async function scrapeToSimpleText(url: string): Promise<string> {
@@ -264,28 +314,46 @@ app.delete('/api/buckets/:bucketId', async (req, res) => {
   return res.status(204).send();
 });
 
-app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
+app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res) => {
   if (!requireDb(res)) return;
   const dbClient = db!;
   const bucketId = req.params.bucketId;
-  const parsed = ingestSchema.safeParse(req.body);
+
+  const rawPayload = {
+    text: typeof req.body?.text === 'string' ? req.body.text : undefined,
+    sharedUrl: typeof req.body?.sharedUrl === 'string' ? req.body.sharedUrl : undefined,
+    source: typeof req.body?.source === 'string' ? req.body.source : undefined,
+    title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+  };
+
+  const parsed = ingestSchema.safeParse(rawPayload);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  if (!parsed.data.text && !parsed.data.sharedUrl) {
-    return res.status(400).json({ error: 'text or sharedUrl is required' });
+  if (!parsed.data.text && !parsed.data.sharedUrl && !req.file) {
+    return res.status(400).json({ error: 'text, sharedUrl, or file is required' });
   }
 
   let normalized = parsed.data.text ?? '';
+  let finalTitle = parsed.data.title ?? null;
 
-  if (parsed.data.sharedUrl) {
-    normalized = await scrapeToSimpleText(parsed.data.sharedUrl);
+  try {
+    if (req.file) {
+      const fileText = await extractTextFromUpload(req.file);
+      normalized = `File: ${req.file.originalname}\n\n${fileText}`;
+      if (!finalTitle) finalTitle = req.file.originalname;
+    } else if (parsed.data.sharedUrl) {
+      normalized = await scrapeToSimpleText(parsed.data.sharedUrl);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to extract file content';
+    return res.status(400).json({ error: message });
   }
 
   const { data, error } = await dbClient
     .from('bucket_items')
     .insert({
       bucket_id: bucketId,
-      title: parsed.data.title ?? null,
+      title: finalTitle,
       raw_text: parsed.data.text ?? null,
       normalized_text: normalized,
       shared_url: parsed.data.sharedUrl ?? null,
