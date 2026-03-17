@@ -5,7 +5,6 @@ import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
-import { marked } from 'marked';
 import { createClient } from '@supabase/supabase-js';
 
 const app = express();
@@ -110,7 +109,16 @@ async function fetchText(url: string) {
   return res.text();
 }
 
-async function scrapeToMarkdown(url: string): Promise<string> {
+function asSimpleText(value: string | null | undefined) {
+  const raw = value ?? '';
+  if (/<\/?[a-z][\s\S]*>/i.test(raw)) {
+    const dom = new JSDOM(raw);
+    return normalizeText(dom.window.document.body.textContent);
+  }
+  return normalizeText(raw);
+}
+
+async function scrapeToSimpleText(url: string): Promise<string> {
   let title = url;
   let text = '';
   let method = 'none';
@@ -146,8 +154,7 @@ async function scrapeToMarkdown(url: string): Promise<string> {
   }
 
   const clipped = text.slice(0, 60000);
-  const markdown = `# ${title}\n\nSource: ${url}\n\nExtraction Method: ${method}\n\n${clipped}`;
-  return marked.parse(markdown) as string;
+  return `Title: ${title}\nSource: ${url}\nExtraction Method: ${method}\n\n${clipped}`;
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true, configured: Boolean(db) }));
@@ -271,7 +278,7 @@ app.post('/api/buckets/:bucketId/ingest', async (req, res) => {
   let normalized = parsed.data.text ?? '';
 
   if (parsed.data.sharedUrl) {
-    normalized = await scrapeToMarkdown(parsed.data.sharedUrl);
+    normalized = await scrapeToSimpleText(parsed.data.sharedUrl);
   }
 
   const { data, error } = await dbClient
@@ -296,6 +303,7 @@ app.get('/api/agent/fetch/:endpointKey', async (req, res) => {
   if (!requireDb(res)) return;
   const dbClient = db!;
   const endpointKey = req.params.endpointKey;
+  const format = String(req.query.format ?? 'text').toLowerCase();
 
   const { data: bucket, error: bucketError } = await dbClient
     .from('agent_buckets')
@@ -305,16 +313,44 @@ app.get('/api/agent/fetch/:endpointKey', async (req, res) => {
 
   if (bucketError || !bucket) return res.status(404).json({ error: 'Bucket endpoint not found' });
 
+  if (format === 'json') {
+    const { data: items, error: itemsError } = await dbClient
+      .from('bucket_items')
+      .select('*')
+      .eq('bucket_id', bucket.id)
+      .in('status', ['queued', 'in_progress'])
+      .order('created_at', { ascending: true })
+      .limit(20);
+
+    if (itemsError) return res.status(500).json({ error: itemsError.message });
+    return res.json({ bucket, items });
+  }
+
+  const consume = req.query.consume !== 'false';
+
   const { data: items, error: itemsError } = await dbClient
     .from('bucket_items')
     .select('*')
     .eq('bucket_id', bucket.id)
-    .in('status', ['queued', 'in_progress'])
+    .eq('status', 'queued')
     .order('created_at', { ascending: true })
     .limit(20);
 
   if (itemsError) return res.status(500).json({ error: itemsError.message });
-  return res.json({ bucket, items });
+
+  const payload = (items ?? [])
+    .map((item) => asSimpleText(item.normalized_text || item.raw_text || ''))
+    .filter(Boolean)
+    .join('\n\n-----\n\n');
+
+  if (consume && items && items.length > 0) {
+    const itemIds = items.map((item) => item.id);
+    const { error: deleteError } = await dbClient.from('bucket_items').delete().in('id', itemIds);
+    if (deleteError) return res.status(500).json({ error: deleteError.message });
+  }
+
+  res.setHeader('content-type', 'text/plain; charset=utf-8');
+  return res.status(200).send(payload);
 });
 
 app.post('/api/agent/report', async (req, res) => {

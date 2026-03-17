@@ -1,10 +1,12 @@
 # OpenClaw Agent API Examples
 
-## 1) Fetch queued work
+## 1) Fetch queued work (plain text + consume)
 
 ```bash
-curl "$API_BASE/api/agent/fetch/$ENDPOINT_KEY"
+curl "$API_BASE/api/agent/fetch/$ENDPOINT_KEY?format=text&consume=true"
 ```
+
+This returns simple extracted text chunks. Any fetched chunks are deleted after pickup.
 
 ## 2) Report progress/completion
 
