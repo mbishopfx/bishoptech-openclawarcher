@@ -7,7 +7,6 @@ import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
-import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
 const app = express();
@@ -138,14 +137,21 @@ async function extractTextFromUpload(file: Express.Multer.File) {
   const mime = file.mimetype;
 
   if (mime === 'application/pdf' || ext === '.pdf') {
-    const parser = new PDFParse({ data: file.buffer });
     try {
-      const parsed = await parser.getText();
-      const text = normalizeText(parsed.text);
-      if (!text) throw new Error('PDF text extraction returned empty content');
-      return text;
-    } finally {
-      await parser.destroy();
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: file.buffer });
+
+      try {
+        const parsed = await parser.getText();
+        const text = normalizeText(parsed.text);
+        if (!text) throw new Error('PDF text extraction returned empty content');
+        return text;
+      } finally {
+        await parser.destroy();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown PDF extraction error';
+      throw new Error(`PDF extraction failed on this runtime: ${message}`);
     }
   }
 
