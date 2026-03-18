@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { isIP } from 'node:net';
 import express from 'express';
 import cors from 'cors';
 import { z } from 'zod';
@@ -102,18 +103,43 @@ function extractReadableFromHtml(html: string, url: string) {
 }
 
 async function fetchText(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      'user-agent': 'OpenClaw-Agent-Command-Center/1.0',
-      accept: 'text/html, text/plain, application/xhtml+xml, */*;q=0.8',
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch URL (${res.status})`);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'user-agent': 'OpenClaw-Agent-Command-Center/1.0',
+        accept: 'text/html, text/plain, application/xhtml+xml, */*;q=0.8',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch URL (${res.status})`);
+    }
+
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (
+      contentType &&
+      !contentType.includes('text/') &&
+      !contentType.includes('html') &&
+      !contentType.includes('xml') &&
+      !contentType.includes('json')
+    ) {
+      throw new Error(`Unsupported content-type for extraction: ${contentType}`);
+    }
+
+    const raw = await res.text();
+    return raw.slice(0, 2_000_000);
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('URL fetch timed out');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return res.text();
 }
 
 function asSimpleText(value: string | null | undefined) {
@@ -130,6 +156,54 @@ function getFileExtension(name: string | undefined) {
   const idx = name.lastIndexOf('.');
   if (idx < 0) return '';
   return name.slice(idx).toLowerCase();
+}
+
+function isPrivateIpv4(hostname: string) {
+  const parts = hostname.split('.').map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
+
+  const [a, b] = parts;
+  if (a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+function isPrivateHost(hostname: string) {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return true;
+
+  const ipType = isIP(host);
+  if (ipType === 4) return isPrivateIpv4(host);
+  if (ipType === 6) {
+    return host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80');
+  }
+
+  return false;
+}
+
+function validateSharedUrl(rawUrl: string) {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid shared URL');
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Only http and https URLs are supported');
+  }
+
+  if (url.username || url.password) {
+    throw new Error('Shared URL must not include embedded credentials');
+  }
+
+  if (isPrivateHost(url.hostname)) {
+    throw new Error('Shared URL host is not allowed');
+  }
+
+  return url.toString();
 }
 
 async function extractTextFromUpload(file: Express.Multer.File) {
@@ -174,7 +248,7 @@ async function extractTextFromUpload(file: Express.Multer.File) {
   throw new Error('Unsupported file type. Upload PDF, DOC, or DOCX.');
 }
 
-async function scrapeToSimpleText(url: string): Promise<string> {
+async function scrapeToSimpleText(url: string): Promise<{ title: string; method: string; normalizedText: string }> {
   let title = url;
   let text = '';
   let method = 'none';
@@ -210,7 +284,11 @@ async function scrapeToSimpleText(url: string): Promise<string> {
   }
 
   const clipped = text.slice(0, 60000);
-  return `Title: ${title}\nSource: ${url}\nExtraction Method: ${method}\n\n${clipped}`;
+  return {
+    title,
+    method,
+    normalizedText: `Title: ${title}\nSource: ${url}\nExtraction Method: ${method}\n\n${clipped}`,
+  };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true, configured: Boolean(db) }));
@@ -351,7 +429,17 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
   const parsed = ingestSchema.safeParse(rawPayload);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  if (!parsed.data.text && !parsed.data.sharedUrl && !req.file) {
+  let sharedUrl: string | undefined;
+  if (parsed.data.sharedUrl) {
+    try {
+      sharedUrl = validateSharedUrl(parsed.data.sharedUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid shared URL';
+      return res.status(400).json({ error: message });
+    }
+  }
+
+  if (!parsed.data.text && !sharedUrl && !req.file) {
     return res.status(400).json({ error: 'text, sharedUrl, or file is required' });
   }
 
@@ -363,8 +451,10 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
       const fileText = await extractTextFromUpload(req.file);
       normalized = `File: ${req.file.originalname}\n\n${fileText}`;
       if (!finalTitle) finalTitle = req.file.originalname;
-    } else if (parsed.data.sharedUrl) {
-      normalized = await scrapeToSimpleText(parsed.data.sharedUrl);
+    } else if (sharedUrl) {
+      const extracted = await scrapeToSimpleText(sharedUrl);
+      normalized = extracted.normalizedText;
+      if (!finalTitle) finalTitle = extracted.title;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to extract file content';
@@ -378,7 +468,7 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
       title: finalTitle,
       raw_text: parsed.data.text ?? null,
       normalized_text: normalized,
-      shared_url: parsed.data.sharedUrl ?? null,
+      shared_url: sharedUrl ?? null,
       source: parsed.data.source,
       status: 'queued',
     })
