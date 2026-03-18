@@ -256,16 +256,39 @@ export default function Page() {
                   const linkValue = sharedUrl.trim();
                   const textValue = rawText.trim();
 
-                  const form = new FormData();
-                  if (textValue) form.append('text', textValue);
-                  if (linkValue) form.append('sharedUrl', linkValue);
-                  if (selectedFile) form.append('file', selectedFile);
-                  form.append('source', 'manual');
+                  const requestUrl = `${apiBase}/api/buckets/${current.id}/ingest`;
 
-                  const response = await fetch(`${apiBase}/api/buckets/${current.id}/ingest`, {
-                    method: 'POST',
-                    body: form,
-                  });
+                  let response: Response;
+                  if (selectedFile) {
+                    const form = new FormData();
+                    if (textValue) form.append('text', textValue);
+                    if (linkValue) {
+                      form.append('sharedUrl', linkValue);
+                      form.append('shared_url', linkValue);
+                      form.append('url', linkValue);
+                    }
+                    form.append('file', selectedFile);
+                    form.append('source', 'manual');
+
+                    response = await fetch(requestUrl, {
+                      method: 'POST',
+                      body: form,
+                    });
+                  } else {
+                    const payload: Record<string, string> = { source: 'manual' };
+                    if (textValue) payload.text = textValue;
+                    if (linkValue) {
+                      payload.sharedUrl = linkValue;
+                      payload.shared_url = linkValue;
+                      payload.url = linkValue;
+                    }
+
+                    response = await fetch(requestUrl, {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json' },
+                      body: JSON.stringify(payload),
+                    });
+                  }
 
                   if (!response.ok) {
                     const failureBody = await response.json().catch(() => null);
