@@ -319,11 +319,27 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
   const dbClient = db!;
   const bucketId = req.params.bucketId;
 
+  const stringField = (...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed) return trimmed;
+      }
+    }
+    return undefined;
+  };
+
   const rawPayload = {
-    text: typeof req.body?.text === 'string' ? req.body.text : undefined,
-    sharedUrl: typeof req.body?.sharedUrl === 'string' ? req.body.sharedUrl : undefined,
-    source: typeof req.body?.source === 'string' ? req.body.source : undefined,
-    title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+    text: stringField(req.body?.text, req.body?.rawText),
+    sharedUrl: stringField(
+      req.body?.sharedUrl,
+      req.body?.shared_url,
+      req.body?.sharedURL,
+      req.body?.url,
+      req.body?.link,
+    ),
+    source: stringField(req.body?.source),
+    title: stringField(req.body?.title),
   };
 
   const parsed = ingestSchema.safeParse(rawPayload);
