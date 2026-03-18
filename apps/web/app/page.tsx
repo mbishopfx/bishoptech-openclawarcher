@@ -46,8 +46,6 @@ export default function Page() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [rawText, setRawText] = useState('');
-  const [sharedUrl, setSharedUrl] = useState('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestNotice, setIngestNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
@@ -234,76 +232,34 @@ export default function Page() {
 
           <div className="cyber-panel p-4 space-y-3">
             <h2 className="text-lg font-semibold text-cyan-300">Ingest Content</h2>
-            <p className="text-xs text-cyan-300/70">Paste shared Grok/Gemini/ChatGPT URL, raw notes, or upload PDF/DOC files. OpenClaw agents will fetch from this topic endpoint.</p>
-            <input
-              className="w-full bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
-              placeholder="Shared chat URL"
-              value={sharedUrl}
-              onChange={(e) => setSharedUrl(e.target.value)}
-              disabled={isIngesting}
-            />
+            <p className="text-xs text-cyan-300/70">Paste full chat transcript text here. OpenClaw agents will fetch this content from the selected topic endpoint.</p>
             <textarea
               className="w-full h-44 bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
-              placeholder="Raw text notes, corrections, requirements..."
+              placeholder="Paste chat transcript text..."
               value={rawText}
               onChange={(e) => setRawText(e.target.value)}
               disabled={isIngesting}
             />
-            <div className="space-y-1">
-              <label className="text-xs text-cyan-300/70">Attach file (PDF, DOC, DOCX)</label>
-              <input
-                type="file"
-                accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                className="w-full bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-cyan-700/80 file:px-2 file:py-1 file:text-xs file:font-semibold file:text-cyan-100"
-                disabled={isIngesting}
-                onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
-              />
-              {selectedFile && <p className="text-[11px] text-cyan-200/80">Selected: {selectedFile.name}</p>}
-            </div>
             <button
               className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
-              disabled={!current || isIngesting}
+              disabled={!current || isIngesting || !rawText.trim()}
               onClick={async () => {
                 if (!current || isIngesting) return;
                 setIsIngesting(true);
 
                 try {
-                  const linkValue = sharedUrl.trim();
                   const textValue = rawText.trim();
+                  if (!textValue) {
+                    throw new Error('Chat transcript text is required.');
+                  }
 
                   const requestUrl = `${apiBase}/api/buckets/${current.id}/ingest`;
-
-                  let response: Response;
-                  if (selectedFile) {
-                    const form = new FormData();
-                    if (textValue) form.append('text', textValue);
-                    if (linkValue) {
-                      form.append('sharedUrl', linkValue);
-                      form.append('shared_url', linkValue);
-                      form.append('url', linkValue);
-                    }
-                    form.append('file', selectedFile);
-                    form.append('source', 'manual');
-
-                    response = await fetch(requestUrl, {
-                      method: 'POST',
-                      body: form,
-                    });
-                  } else {
-                    const payload: Record<string, string> = { source: 'manual' };
-                    if (textValue) payload.text = textValue;
-                    if (linkValue) {
-                      payload.sharedUrl = linkValue;
-                      payload.shared_url = linkValue;
-                      payload.url = linkValue;
-                    }
-
-                    response = await fetch(requestUrl, {
-                      method: 'POST',
-                      headers: { 'content-type': 'application/json' },
-                      body: JSON.stringify(payload),
-                    });
-                  }
+                  const payload: Record<string, string> = { source: 'manual', text: textValue };
+                  const response = await fetch(requestUrl, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify(payload),
+                  });
 
                   if (!response.ok) {
                     const failureBody = await response.json().catch(() => null);
@@ -311,18 +267,12 @@ export default function Page() {
                   }
 
                   setRawText('');
-                  setSharedUrl('');
-                  setSelectedFile(null);
                   await loadLogs(current.id);
                   await loadItemsForBucket(current.id);
 
                   setIngestNotice({
                     type: 'success',
-                    message: selectedFile
-                      ? `${selectedFile.name} successfully ingested and queued for this topic.`
-                      : linkValue
-                        ? 'Link successfully ingested and queued for this topic.'
-                        : 'Content successfully queued for this topic.',
+                    message: 'Chat transcript successfully queued for this topic.',
                   });
                 } catch (error) {
                   const message = error instanceof Error ? error.message : 'Ingest failed.';
