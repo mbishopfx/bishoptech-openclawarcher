@@ -9,9 +9,10 @@ import { Readability } from '@mozilla/readability';
 import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
 import mammoth from 'mammoth';
+import { marked } from 'marked';
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '20mb' }));
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN?.split(',') ?? '*',
@@ -73,6 +74,16 @@ function requireDb(res: express.Response) {
 
 function normalizeText(value: string | null | undefined) {
   return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeMultilineText(value: string | null | undefined) {
+  return (value ?? '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function extractReadableFromHtml(html: string, url: string) {
@@ -146,9 +157,9 @@ function asSimpleText(value: string | null | undefined) {
   const raw = value ?? '';
   if (/<\/?[a-z][\s\S]*>/i.test(raw)) {
     const dom = new JSDOM(raw);
-    return normalizeText(dom.window.document.body.textContent);
+    return normalizeMultilineText(dom.window.document.body.textContent);
   }
-  return normalizeText(raw);
+  return normalizeMultilineText(raw);
 }
 
 function getFileExtension(name: string | undefined) {
@@ -245,7 +256,120 @@ async function extractTextFromUpload(file: Express.Multer.File) {
     return bestEffort;
   }
 
-  throw new Error('Unsupported file type. Upload PDF, DOC, or DOCX.');
+  if (mime === 'text/markdown' || ext === '.md' || ext === '.markdown') {
+    const markdown = file.buffer.toString('utf8');
+    const html = await marked.parse(markdown);
+    const text = asSimpleText(html);
+    if (!text) throw new Error('Markdown extraction returned empty content');
+    return text;
+  }
+
+  if (mime === 'text/plain' || ext === '.txt') {
+    const text = normalizeMultilineText(file.buffer.toString('utf8'));
+    if (!text) throw new Error('Text file extraction returned empty content');
+    return text;
+  }
+
+  throw new Error('Unsupported file type. Upload PDF, DOC, DOCX, MD, or TXT.');
+}
+
+function clipForModelInput(text: string, maxChars = 120000) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[Truncated ${text.length - maxChars} characters due to model input limit.]`;
+}
+
+function extractAssistantTextFromResponse(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return '';
+  const root = payload as { choices?: Array<{ message?: { content?: unknown } }> };
+  const content = root.choices?.[0]?.message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (!part || typeof part !== 'object') return '';
+        const obj = part as { type?: string; text?: string };
+        return obj.type === 'text' && typeof obj.text === 'string' ? obj.text : '';
+      })
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+async function generatePhasePlan(params: {
+  bucketId: string;
+  title?: string | null;
+  sourceType: string;
+  sharedUrl?: string;
+  parsedSourceText: string;
+}) {
+  const apiKey = process.env.XAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('XAI_API_KEY is not configured on the API server');
+  }
+
+  const apiBase = (process.env.XAI_API_BASE ?? 'https://api.x.ai/v1').replace(/\/+$/, '');
+  const model = process.env.XAI_MODEL ?? 'grok-3-mini';
+  const userInput = clipForModelInput(params.parsedSourceText);
+
+  const systemPrompt = `You are OpenClaw planning core for production delivery plans.
+
+Output must be plain text only.
+
+Create a concrete "Phase 1" through "Phase 4" implementation plan that takes the provided source material to production.
+Project constraints:
+- Backend platform: Railway.
+- Frontend platform: Vercel.
+- Git hosting/deployment workflow: GitHub (already authenticated in environment).
+- In Phase 4 you MUST include exact operational deployment instructions using Railway CLI and Vercel CLI.
+- Every phase MUST include a Slack reporting step so execution always reports status/results to Slack.
+- Include expected artifacts, owner role suggestions, validation checks, and rollback notes per phase.
+- Include cron/build automation guidance so agents can create scheduled jobs after consuming this plan.
+
+Formatting requirements:
+- Use this section order exactly: OVERVIEW, PHASE 1, PHASE 2, PHASE 3, PHASE 4, ACCEPTANCE CHECKLIST.
+- Keep each phase action-oriented and implementation-ready.
+- Do not use markdown tables.
+- Do not include code fences.
+- Keep output under 3500 words.`;
+
+  const userPrompt = `Build a 4-phase production plan from this parsed ingest source.
+
+Bucket ID: ${params.bucketId}
+Title: ${params.title ?? 'Untitled ingest'}
+Source Type: ${params.sourceType}
+Shared URL: ${params.sharedUrl ?? 'N/A'}
+
+Parsed Source Content:
+${userInput}`;
+
+  const response = await fetch(`${apiBase}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`xAI planning request failed (${response.status}): ${errText.slice(0, 500)}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const planText = normalizeMultilineText(extractAssistantTextFromResponse(payload));
+  if (!planText) {
+    throw new Error('xAI planning response was empty');
+  }
+  return planText;
 }
 
 async function scrapeToSimpleText(url: string): Promise<{ title: string; method: string; normalizedText: string }> {
@@ -401,7 +525,7 @@ app.delete('/api/buckets/:bucketId', async (req, res) => {
 app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res) => {
   if (!requireDb(res)) return;
   const dbClient = db!;
-  const bucketId = req.params.bucketId;
+  const bucketId = String(req.params.bucketId ?? '');
 
   const stringField = (...values: unknown[]) => {
     for (const value of values) {
@@ -444,21 +568,37 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
   }
 
   let normalized = parsed.data.text ?? '';
+  let parsedSourceText = parsed.data.text ?? '';
   let finalTitle = parsed.data.title ?? null;
 
   try {
     if (req.file) {
       const fileText = await extractTextFromUpload(req.file);
-      normalized = `File: ${req.file.originalname}\n\n${fileText}`;
+      parsedSourceText = `File: ${req.file.originalname}\n\n${fileText}`;
       if (!finalTitle) finalTitle = req.file.originalname;
     } else if (sharedUrl) {
       const extracted = await scrapeToSimpleText(sharedUrl);
-      normalized = extracted.normalizedText;
+      parsedSourceText = extracted.normalizedText;
       if (!finalTitle) finalTitle = extracted.title;
+    } else {
+      parsedSourceText = normalizeMultilineText(parsed.data.text);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to extract file content';
     return res.status(400).json({ error: message });
+  }
+
+  try {
+    normalized = await generatePhasePlan({
+      bucketId,
+      title: finalTitle,
+      sourceType: parsed.data.source,
+      sharedUrl,
+      parsedSourceText,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to generate phase plan';
+    return res.status(502).json({ error: message });
   }
 
   const { data, error } = await dbClient
@@ -466,7 +606,7 @@ app.post('/api/buckets/:bucketId/ingest', upload.single('file'), async (req, res
     .insert({
       bucket_id: bucketId,
       title: finalTitle,
-      raw_text: parsed.data.text ?? null,
+      raw_text: parsedSourceText || null,
       normalized_text: normalized,
       shared_url: sharedUrl ?? null,
       source: parsed.data.source,
