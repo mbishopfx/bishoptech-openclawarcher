@@ -11,9 +11,19 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+const productionApiBase = 'https://bishoptech-openclawarcher-api-production.up.railway.app';
 
-function buildAgentPrompt(topicBucket: Bucket, incomingBucket?: Bucket) {
+function resolveApiBase() {
+  if (configuredApiBase) return configuredApiBase;
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:4000';
+  }
+  return productionApiBase;
+}
+
+function buildAgentPrompt(topicBucket: Bucket, incomingBucket: Bucket | undefined, apiBase: string) {
   const topicFetchUrl = `${apiBase}/api/agent/fetch/${topicBucket.endpoint_key}?format=text&consume=true`;
   const reportUrl = `${apiBase}/api/agent/report`;
   const incomingEndpointKey = incomingBucket?.endpoint_key ?? '<INCOMING_ENDPOINT_KEY>';
@@ -23,6 +33,7 @@ function buildAgentPrompt(topicBucket: Bucket, incomingBucket?: Bucket) {
 }
 
 export default function Page() {
+  const apiBase = useMemo(() => resolveApiBase(), []);
   const [tab, setTab] = useState<Tab>('topics');
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
@@ -36,26 +47,44 @@ export default function Page() {
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isIos, setIsIos] = useState(false);
   const [isStandalone, setIsStandalone] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+
+  async function parseJsonOrThrow<T>(res: Response, context: string) {
+    if (!res.ok) {
+      let details = '';
+      try {
+        const body = await res.json();
+        details = typeof body?.error === 'string' ? body.error : JSON.stringify(body);
+      } catch {
+        details = await res.text();
+      }
+      throw new Error(`${context} failed (${res.status})${details ? `: ${details}` : ''}`);
+    }
+    return (await res.json()) as T;
+  }
 
   async function loadBuckets() {
     const res = await fetch(`${apiBase}/api/buckets`);
-    const data: Bucket[] = await res.json();
+    const data = await parseJsonOrThrow<Bucket[]>(res, 'Load topics');
     setBuckets(data);
     if (!selectedBucket && data[0]) setSelectedBucket(data[0].id);
+    setConnectionError(null);
     return data;
   }
 
   async function loadLogs(bucketId?: string | null) {
     const qp = bucketId ? `?bucketId=${bucketId}` : '';
     const res = await fetch(`${apiBase}/api/logs${qp}`);
-    const data: AgentLog[] = await res.json();
+    const data = await parseJsonOrThrow<AgentLog[]>(res, 'Load logs');
     setLogs(data);
+    setConnectionError(null);
   }
 
   async function loadItemsForBucket(bucketId: string) {
     const res = await fetch(`${apiBase}/api/buckets/${bucketId}/items`);
-    const data: BucketItem[] = await res.json();
+    const data = await parseJsonOrThrow<BucketItem[]>(res, 'Load topic items');
     setItemsByBucket((prev) => ({ ...prev, [bucketId]: data }));
+    setConnectionError(null);
     return data;
   }
 
@@ -63,20 +92,26 @@ export default function Page() {
     const entries = await Promise.all(
       bucketList.map(async (bucket) => {
         const res = await fetch(`${apiBase}/api/buckets/${bucket.id}/items`);
-        const data: BucketItem[] = await res.json();
+        const data = await parseJsonOrThrow<BucketItem[]>(res, `Load items for ${bucket.name}`);
         return [bucket.id, data] as const;
       }),
     );
 
     setItemsByBucket(Object.fromEntries(entries));
+    setConnectionError(null);
   }
 
   useEffect(() => {
     (async () => {
-      const bucketList = await loadBuckets();
-      await loadAllItems(bucketList);
+      try {
+        const bucketList = await loadBuckets();
+        await loadAllItems(bucketList);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to load topics.';
+        setConnectionError(`${message} API: ${apiBase}`);
+      }
     })();
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     if ('serviceWorker' in navigator) {
@@ -97,17 +132,29 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    loadLogs(selectedBucket);
-    if (selectedBucket) loadItemsForBucket(selectedBucket);
+    (async () => {
+      try {
+        await loadLogs(selectedBucket);
+        if (selectedBucket) await loadItemsForBucket(selectedBucket);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to refresh dashboard data.';
+        setConnectionError(`${message} API: ${apiBase}`);
+      }
+    })();
 
     const timer = setInterval(async () => {
-      await loadLogs(selectedBucket);
-      const currentBuckets = await loadBuckets();
-      await loadAllItems(currentBuckets);
+      try {
+        await loadLogs(selectedBucket);
+        const currentBuckets = await loadBuckets();
+        await loadAllItems(currentBuckets);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to refresh dashboard data.';
+        setConnectionError(`${message} API: ${apiBase}`);
+      }
     }, 5 * 60 * 1000);
 
     return () => clearInterval(timer);
-  }, [selectedBucket]);
+  }, [selectedBucket, apiBase]);
 
   const current = useMemo(() => buckets.find((b) => b.id === selectedBucket) ?? null, [buckets, selectedBucket]);
   const currentItems = current ? itemsByBucket[current.id] || [] : [];
@@ -145,6 +192,11 @@ export default function Page() {
           Install Mobile App
         </button>
       </header>
+      {connectionError && (
+        <section className="cyber-panel p-3 border border-rose-400/50 bg-rose-950/35">
+          <p className="text-sm text-rose-200">{connectionError}</p>
+        </section>
+      )}
 
       <AgentRoom3D buckets={buckets} logs={logs} itemsByBucket={itemsByBucket} />
 
@@ -359,7 +411,7 @@ export default function Page() {
             {buckets.map((bucket) => {
               const fetchUrl = `${apiBase}/api/agent/fetch/${bucket.endpoint_key}?format=text&consume=true`;
               const incomingBucket = buckets.find((b) => b.name.trim().toLowerCase() === 'incoming');
-              const prompt = buildAgentPrompt(bucket, incomingBucket);
+              const prompt = buildAgentPrompt(bucket, incomingBucket, apiBase);
               const itemCount = (itemsByBucket[bucket.id] || []).length;
               const latestLink = (itemsByBucket[bucket.id] || []).find((item) => item.shared_url)?.shared_url;
 
