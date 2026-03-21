@@ -13,6 +13,7 @@ type BeforeInstallPromptEvent = Event & {
 
 const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
 const productionApiBase = 'https://bishoptech-openclawarcher-api-production.up.railway.app';
+const swVersion = '2026-03-21-2';
 
 function resolveApiBase() {
   if (configuredApiBase) return configuredApiBase;
@@ -115,7 +116,7 @@ export default function Page() {
 
   useEffect(() => {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => null);
+      navigator.serviceWorker.register(`/sw.js?v=${swVersion}`).catch(() => null);
     }
 
     const ios = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
@@ -183,6 +184,7 @@ export default function Page() {
           <div className="min-w-0">
             <h1 className="text-cyan-100 font-semibold text-sm md:text-base truncate">TRD Agent Spawn / Ingest System</h1>
             <p className="text-cyan-300/70 text-[11px] md:text-xs">Mobile-ready command center for cross-machine OpenClaw orchestration</p>
+            <p className="text-cyan-300/60 text-[10px] md:text-[11px] font-mono break-all">API: {apiBase}</p>
           </div>
         </div>
         <button
