@@ -13,9 +13,16 @@ import { marked } from 'marked';
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
+
+const configuredCorsOrigins = (process.env.CORS_ORIGIN ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+const corsOrigin = configuredCorsOrigins.length === 0 || configuredCorsOrigins.includes('*') ? '*' : configuredCorsOrigins;
+
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN?.split(',') ?? '*',
+    origin: corsOrigin,
   }),
 );
 
