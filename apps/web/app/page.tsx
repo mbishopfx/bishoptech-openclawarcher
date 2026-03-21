@@ -43,6 +43,9 @@ export default function Page() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [rawText, setRawText] = useState('');
+  const [sharedUrlInput, setSharedUrlInput] = useState('');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestNotice, setIngestNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
@@ -62,6 +65,17 @@ export default function Page() {
       throw new Error(`${context} failed (${res.status})${details ? `: ${details}` : ''}`);
     }
     return (await res.json()) as T;
+  }
+
+  async function parseIngestError(res: Response) {
+    try {
+      const body = await res.json();
+      if (typeof body?.error === 'string') return body.error;
+      return JSON.stringify(body);
+    } catch {
+      const text = await res.text();
+      return text || `Ingest failed (${res.status})`;
+    }
   }
 
   async function loadBuckets() {
@@ -176,6 +190,28 @@ export default function Page() {
     window.alert('Install prompt not available yet. On Android/desktop, open browser menu and choose "Install app".');
   }
 
+  async function runIngestRequest(send: (bucketId: string) => Promise<Response>, successMessage: string) {
+    if (!current || isIngesting) return;
+    setIsIngesting(true);
+    const bucketId = current.id;
+
+    try {
+      const response = await send(bucketId);
+      if (!response.ok) {
+        throw new Error(await parseIngestError(response));
+      }
+
+      await loadLogs(bucketId);
+      await loadItemsForBucket(bucketId);
+      setIngestNotice({ type: 'success', message: successMessage });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ingest failed.';
+      setIngestNotice({ type: 'error', message });
+    } finally {
+      setIsIngesting(false);
+    }
+  }
+
   return (
     <main className="min-h-screen p-3 md:p-6 space-y-4 md:space-y-6">
       <header className="cyber-panel p-3 md:p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -271,59 +307,123 @@ export default function Page() {
 
           <div className="cyber-panel p-4 space-y-3">
             <h2 className="text-lg font-semibold text-cyan-300">Ingest Content</h2>
-            <p className="text-xs text-cyan-300/70">Paste full chat transcript text here. OpenClaw agents will fetch this content from the selected topic endpoint.</p>
-            <textarea
-              className="w-full h-44 bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
-              placeholder="Paste chat transcript text..."
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              disabled={isIngesting}
-            />
-            <button
-              className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
-              disabled={!current || isIngesting || !rawText.trim()}
-              onClick={async () => {
-                if (!current || isIngesting) return;
-                setIsIngesting(true);
+            <p className="text-xs text-cyan-300/70">Choose one ingest type. Each action parses content first, generates a phase plan, and queues it for agent fetch.</p>
 
-                try {
+            <div className="space-y-3 border border-cyan-500/20 rounded-lg p-3 bg-black/35">
+              <p className="text-sm font-semibold text-cyan-200">1) Raw Text</p>
+              <textarea
+                className="w-full h-28 bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
+                placeholder="Paste any length of chat text..."
+                value={rawText}
+                onChange={(e) => setRawText(e.target.value)}
+                disabled={isIngesting}
+              />
+              <button
+                className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
+                disabled={!current || isIngesting || !rawText.trim()}
+                onClick={async () => {
                   const textValue = rawText.trim();
                   if (!textValue) {
-                    throw new Error('Chat transcript text is required.');
+                    setIngestNotice({ type: 'error', message: 'Raw text is required.' });
+                    return;
                   }
 
-                  const requestUrl = `${apiBase}/api/buckets/${current.id}/ingest`;
-                  const payload: Record<string, string> = { source: 'manual', text: textValue };
-                  const response = await fetch(requestUrl, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify(payload),
-                  });
-
-                  if (!response.ok) {
-                    const failureBody = await response.json().catch(() => null);
-                    throw new Error(failureBody?.error ?? `Ingest failed (${response.status})`);
-                  }
-
+                  await runIngestRequest(
+                    (bucketId) =>
+                      fetch(`${apiBase}/api/buckets/${bucketId}/ingest`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ source: 'manual', text: textValue }),
+                      }),
+                    'Raw text ingested, plan generated, and queued.',
+                  );
                   setRawText('');
-                  await loadLogs(current.id);
-                  await loadItemsForBucket(current.id);
+                }}
+              >
+                {isIngesting && <span className="h-4 w-4 rounded-full border-2 border-black/40 border-t-black animate-spin" aria-hidden="true" />}
+                {isIngesting ? 'Ingesting…' : 'Queue Raw Text'}
+              </button>
+            </div>
 
-                  setIngestNotice({
-                    type: 'success',
-                    message: 'Plan generated and queued for this topic.',
-                  });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : 'Ingest failed.';
-                  setIngestNotice({ type: 'error', message });
-                } finally {
-                  setIsIngesting(false);
-                }
-              }}
-            >
-              {isIngesting && <span className="h-4 w-4 rounded-full border-2 border-black/40 border-t-black animate-spin" aria-hidden="true" />}
-              {isIngesting ? 'Ingesting…' : 'Queue for Topic'}
-            </button>
+            <div className="space-y-3 border border-cyan-500/20 rounded-lg p-3 bg-black/35">
+              <p className="text-sm font-semibold text-cyan-200">2) Markdown / File Upload</p>
+              <input
+                key={fileInputKey}
+                type="file"
+                accept=".md,.markdown,.txt,.pdf,.doc,.docx"
+                disabled={isIngesting}
+                onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                className="w-full text-xs text-cyan-100 file:mr-3 file:px-3 file:py-1.5 file:rounded file:border-0 file:bg-cyan-600 file:text-black file:font-semibold"
+              />
+              <p className="text-[11px] text-cyan-300/70 break-all">
+                {uploadFile ? `Selected: ${uploadFile.name}` : 'Supports .md, .markdown, .txt, .pdf, .doc, .docx'}
+              </p>
+              <button
+                className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
+                disabled={!current || isIngesting || !uploadFile}
+                onClick={async () => {
+                  if (!uploadFile) {
+                    setIngestNotice({ type: 'error', message: 'Select a file first.' });
+                    return;
+                  }
+
+                  await runIngestRequest(
+                    (bucketId) => {
+                      const formData = new FormData();
+                      formData.append('source', 'manual');
+                      formData.append('file', uploadFile);
+                      return fetch(`${apiBase}/api/buckets/${bucketId}/ingest`, {
+                        method: 'POST',
+                        body: formData,
+                      });
+                    },
+                    'File ingested, plan generated, and queued.',
+                  );
+                  setUploadFile(null);
+                  setFileInputKey((key) => key + 1);
+                }}
+              >
+                {isIngesting && <span className="h-4 w-4 rounded-full border-2 border-black/40 border-t-black animate-spin" aria-hidden="true" />}
+                {isIngesting ? 'Ingesting…' : 'Queue File'}
+              </button>
+            </div>
+
+            <div className="space-y-3 border border-cyan-500/20 rounded-lg p-3 bg-black/35">
+              <p className="text-sm font-semibold text-cyan-200">3) URL Scrape</p>
+              <input
+                className="w-full bg-black/50 border border-cyan-500/30 rounded px-3 py-2 text-sm"
+                placeholder="https://grok.com/c/..."
+                value={sharedUrlInput}
+                onChange={(e) => setSharedUrlInput(e.target.value)}
+                disabled={isIngesting}
+              />
+              <button
+                className="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800/60 disabled:text-cyan-100/70 text-black font-semibold text-sm inline-flex items-center gap-2"
+                disabled={!current || isIngesting || !sharedUrlInput.trim()}
+                onClick={async () => {
+                  const urlValue = sharedUrlInput.trim();
+                  if (!urlValue) {
+                    setIngestNotice({ type: 'error', message: 'URL is required.' });
+                    return;
+                  }
+                  const inferredSource = /grok\.com/i.test(urlValue) ? 'grok' : 'other';
+
+                  await runIngestRequest(
+                    (bucketId) =>
+                      fetch(`${apiBase}/api/buckets/${bucketId}/ingest`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ source: inferredSource, sharedUrl: urlValue }),
+                      }),
+                    'URL scraped, plan generated, and queued.',
+                  );
+                  setSharedUrlInput('');
+                }}
+              >
+                {isIngesting && <span className="h-4 w-4 rounded-full border-2 border-black/40 border-t-black animate-spin" aria-hidden="true" />}
+                {isIngesting ? 'Ingesting…' : 'Queue URL'}
+              </button>
+            </div>
           </div>
 
           <div className="cyber-panel p-4 space-y-3 xl:col-span-2">
