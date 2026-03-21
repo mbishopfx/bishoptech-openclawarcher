@@ -22,21 +22,6 @@ function buildAgentPrompt(topicBucket: Bucket, incomingBucket?: Bucket) {
   return `SYSTEM: TRD Agent Spawn / Ingest System — Client OpenClaw Onboarding\n\nYou are setting up this OpenClaw instance for autonomous project execution and centralized reporting.\n\n========================\nASSIGNED STREAMS\n========================\nPrimary topic (work intake): ${topicBucket.name}\nPrimary fetch URL: ${topicFetchUrl}\nPrimary endpoint key: ${topicBucket.endpoint_key}\n\nIncoming stream (control/reporting): ${incomingFetchUrl}\nIncoming endpoint key: ${incomingEndpointKey}\n\nReport URL: ${reportUrl}\n\n========================\nREQUIRED AGENT ID FORMAT\n========================\nSet a permanent agent ID in this format:\n<trd-client-slug>-<machine-slug>-<agent-number>\nExample: acme-macstudio-01\n\nUse this SAME agentId in all report payloads.\n\n========================\nSTEP 1 — BOOTSTRAP REPORT (one-time, immediately)\n========================\nSend a 'complete' report to Incoming with:\n- host / machine name\n- OS + version\n- openclaw status summary\n- runtime model/default model\n- planned cron schedules (worker + heartbeat)\n- this agentId\n\nPOST ${reportUrl}\n{\n  "endpointKey": "${incomingEndpointKey}",\n  "agentId": "<agent-id>",\n  "status": "complete",\n  "summary": "Bootstrap registration report",\n  "output": "<full environment + schedule manifest>",\n  "meta": {\n    "reportType": "bootstrap",\n    "topicEndpointKey": "${topicBucket.endpoint_key}",\n    "incomingEndpointKey": "${incomingEndpointKey}",\n    "workerSchedule": "every 5 minutes",\n    "heartbeatSchedule": "every 15 minutes"\n  }\n}\n\n========================\nSTEP 2 — CREATE CRON JOBS\n========================\nCreate these recurring jobs:\n\nA) WORKER LOOP (every 5 minutes)\n- Fetch queued items from topic endpoint\n- Execute tasks locally\n- For each task lifecycle, report started/working/complete/failed\n- Include verbose output, command traces, and final result summary\n\nB) HEARTBEAT / STATUS LOOP (every 15 minutes)\n- Report liveness to Incoming stream\n- Include current cron schedules, queue depth, last processed item, last error, and current branch/project if active\n\n========================\nSTEP 3 — EXECUTION CONTRACT\n========================\nFetch endpoint returns simple plain text chunks (not JSON item objects), and fetched chunks are deleted after pickup:\n1) GET ${topicFetchUrl}\n2) Execute locally in OpenClaw\n3) POST progress to ${reportUrl}\n\nReport payload format:\n{\n  "endpointKey": "${topicBucket.endpoint_key}",\n  "agentId": "<agent-id>",\n  "status": "started|working|complete|failed",\n  "summary": "short status update",\n  "output": "full verbose output",\n  "meta": {\n    "schedule": "<cron expression or interval>",\n    "jobType": "worker|heartbeat|manual",\n    "topic": "${topicBucket.name}",\n    "host": "<machine>",\n    "openclawVersion": "<version>"\n  }\n}\n\nAlso post mirrored high-level status updates to Incoming:\n{\n  "endpointKey": "${incomingEndpointKey}",\n  "agentId": "<agent-id>",\n  "status": "working|complete|failed",\n  "summary": "topic progress update",\n  "output": "brief executive + verbose references",\n  "meta": {\n    "reportType": "incoming-mirror",\n    "topicEndpointKey": "${topicBucket.endpoint_key}"\n  }\n}\n\n========================\nNON-NEGOTIABLES\n========================\n- Never skip verbose output\n- Never change agentId once set\n- Always include schedule metadata in reports\n- If cron jobs fail, report failure to Incoming immediately\n- Keep this OpenClaw fully autonomous so no manual follow-up is needed\n`;
 }
 
-function parseExtractedContent(normalizedText: string) {
-  const text = normalizedText ?? '';
-  const titleMatch = text.match(/^Title:\s*(.+)$/m);
-  const methodMatch = text.match(/^Extraction Method:\s*(.+)$/m);
-  const splitIndex = text.indexOf('\n\n');
-  const extractedBody = (splitIndex >= 0 ? text.slice(splitIndex + 2) : text).trim();
-
-  return {
-    title: titleMatch?.[1]?.trim() ?? null,
-    method: methodMatch?.[1]?.trim() ?? null,
-    extractedBody,
-    extractedLength: extractedBody.length,
-  };
-}
-
 export default function Page() {
   const [tab, setTab] = useState<Tab>('topics');
   const [buckets, setBuckets] = useState<Bucket[]>([]);
@@ -272,7 +257,7 @@ export default function Page() {
 
                   setIngestNotice({
                     type: 'success',
-                    message: 'Chat transcript successfully queued for this topic.',
+                    message: 'Plan generated and queued for this topic.',
                   });
                 } catch (error) {
                   const message = error instanceof Error ? error.message : 'Ingest failed.';
@@ -298,9 +283,12 @@ export default function Page() {
             ) : (
               <div className="space-y-2 max-h-[420px] overflow-auto">
                 {currentItems.map((item) => {
-                  const extraction = item.shared_url ? parseExtractedContent(item.normalized_text) : null;
-                  const preview = extraction ? extraction.extractedBody.slice(0, 1500) : '';
-                  const isTruncated = extraction ? extraction.extractedBody.length > preview.length : false;
+                  const normalizedPlan = (item.normalized_text ?? '').trim();
+                  const planPreview = normalizedPlan.slice(0, 2400);
+                  const isPlanTruncated = normalizedPlan.length > planPreview.length;
+                  const parsedSource = (item.raw_text ?? '').trim();
+                  const sourcePreview = parsedSource.slice(0, 500);
+                  const isSourceTruncated = parsedSource.length > sourcePreview.length;
 
                   return (
                     <div key={item.id} className="border border-cyan-500/25 rounded-lg p-3 bg-black/50">
@@ -308,40 +296,38 @@ export default function Page() {
                         <div className="min-w-0">
                           <p className="text-xs font-mono text-cyan-100">{item.source.toUpperCase()} • {item.status}</p>
                           <p className="text-[11px] text-cyan-300/60">{new Date(item.created_at).toLocaleString()}</p>
-                          {item.shared_url && extraction && (
-                            <p className="text-[11px] text-cyan-200/80">
-                              Extraction method: {extraction.method ?? 'unknown'} • {extraction.extractedLength} chars
-                            </p>
-                          )}
+                          <p className="text-[11px] text-cyan-200/80">Generated plan length: {normalizedPlan.length} chars</p>
                           {item.shared_url && (
                             <a href={item.shared_url} target="_blank" rel="noreferrer" className="text-[11px] text-cyan-300 underline break-all">
                               {item.shared_url}
                             </a>
                           )}
-                          {item.shared_url && extraction && (
-                            <details className="mt-2 border border-cyan-500/20 rounded bg-black/45 p-2">
-                              <summary className="text-[11px] text-cyan-300 cursor-pointer">View extracted content</summary>
-                              {extraction.title && <p className="text-[11px] text-cyan-200/80 mt-2">Title: {extraction.title}</p>}
+                          {normalizedPlan && (
+                            <details className="mt-2 border border-cyan-500/20 rounded bg-black/45 p-2" open>
+                              <summary className="text-[11px] text-cyan-300 cursor-pointer">View generated workflow plan (agent fetch text)</summary>
                               <p className="text-xs text-cyan-100/85 mt-2 whitespace-pre-wrap break-words">
-                                {preview}
-                                {isTruncated ? '…' : ''}
+                                {planPreview}
+                                {isPlanTruncated ? '\n…' : ''}
                               </p>
                               <button
                                 className="mt-2 px-2.5 py-1 rounded text-[11px] bg-cyan-600/90 hover:bg-cyan-500 text-black font-semibold"
                                 onClick={async () => {
-                                  await navigator.clipboard.writeText(item.normalized_text);
-                                  setIngestNotice({ type: 'success', message: 'Extracted content copied to clipboard.' });
+                                  await navigator.clipboard.writeText(normalizedPlan);
+                                  setIngestNotice({ type: 'success', message: 'Generated workflow plan copied to clipboard.' });
                                 }}
                               >
-                                Copy Extracted Text
+                                Copy Full Plan
                               </button>
                             </details>
                           )}
-                          {!item.shared_url && item.raw_text && (
-                            <p className="text-xs text-cyan-200/80 mt-1 whitespace-pre-wrap">
-                              {item.raw_text.slice(0, 220)}
-                              {item.raw_text.length > 220 ? '…' : ''}
-                            </p>
+                          {parsedSource && (
+                            <details className="mt-2 border border-cyan-500/20 rounded bg-black/30 p-2">
+                              <summary className="text-[11px] text-cyan-300/85 cursor-pointer">View parsed source input</summary>
+                              <p className="text-xs text-cyan-200/80 mt-2 whitespace-pre-wrap break-words">
+                                {sourcePreview}
+                                {isSourceTruncated ? '\n…' : ''}
+                              </p>
+                            </details>
                           )}
                         </div>
                         <button
