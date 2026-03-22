@@ -366,6 +366,76 @@ Requirements:
   return extracted;
 }
 
+async function generatePhasePlanWithVertex(params: {
+  bucketId: string;
+  title?: string | null;
+  sourceType: string;
+  sharedUrl?: string;
+  parsedSourceText: string;
+}) {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  const project = process.env.GOOGLE_CLOUD_PROJECT;
+  if (!apiKey || !project) {
+    throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex planning');
+  }
+
+  const location = normalizeVertexLocation(process.env.GOOGLE_CLOUD_LOCATION);
+  const model = process.env.VERTEX_MODEL ?? 'gemini-2.5-pro';
+  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const userInput = clipForModelInput(params.parsedSourceText);
+  const prompt = `You are OpenClaw planning core for production delivery plans.
+
+Output must be plain text only.
+
+Create a concrete "Phase 1" through "Phase 4" implementation plan that takes the provided source material to production.
+Project constraints:
+- Backend platform: Railway.
+- Frontend platform: Vercel.
+- Git hosting/deployment workflow: GitHub (already authenticated in environment).
+- In Phase 4 include explicit operational deployment instructions using Railway CLI and Vercel CLI.
+- Every phase must include a Slack reporting step so execution always reports status/results to Slack.
+- Include expected artifacts, owner role suggestions, validation checks, and rollback notes per phase.
+- Include cron/build automation guidance so agents can create scheduled jobs after consuming this plan.
+
+Formatting requirements:
+- Use this section order exactly: OVERVIEW, PHASE 1, PHASE 2, PHASE 3, PHASE 4, ACCEPTANCE CHECKLIST.
+- Keep each phase action-oriented and implementation-ready.
+- Do not use markdown tables.
+- Do not include code fences.
+- Keep output under 3500 words.
+
+Context:
+Bucket ID: ${params.bucketId}
+Title: ${params.title ?? 'Untitled ingest'}
+Source Type: ${params.sourceType}
+Shared URL: ${params.sharedUrl ?? 'N/A'}
+
+Parsed Source Content:
+${userInput}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Vertex planning failed (${response.status}): ${text.slice(0, 500)}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const planText = normalizeMultilineText(extractGeminiText(payload));
+  if (!planText) {
+    throw new Error('Vertex planning response was empty');
+  }
+  return planText;
+}
+
 async function generatePhasePlan(params: {
   bucketId: string;
   title?: string | null;
@@ -373,9 +443,16 @@ async function generatePhasePlan(params: {
   sharedUrl?: string;
   parsedSourceText: string;
 }) {
+  // Primary planner: Vertex Gemini.
+  try {
+    return await generatePhasePlanWithVertex(params);
+  } catch (vertexError) {
+    console.warn('Vertex planning failed, falling back to xAI:', vertexError);
+  }
+
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) {
-    throw new Error('XAI_API_KEY is not configured on the API server');
+    throw new Error('Vertex planning failed and XAI_API_KEY is not configured for fallback');
   }
 
   const apiBase = (process.env.XAI_API_BASE ?? 'https://api.x.ai/v1').replace(/\/+$/, '');
