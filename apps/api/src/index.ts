@@ -183,6 +183,13 @@ function normalizeVertexLocation(rawLocation: string | undefined) {
   return 'global';
 }
 
+function normalizeVertexProject(rawProject: string | undefined) {
+  const value = (rawProject ?? '').trim();
+  if (!value) return '';
+  if (/^\d+$/.test(value)) return value;
+  return value.toLowerCase();
+}
+
 function isPrivateIpv4(hostname: string) {
   const parts = hostname.split('.').map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
@@ -323,7 +330,7 @@ function extractGeminiText(payload: unknown) {
 
 async function extractUrlWithVertexAi(url: string): Promise<string> {
   const apiKey = process.env.GOOGLE_API_KEY;
-  const project = process.env.GOOGLE_CLOUD_PROJECT;
+  const project = normalizeVertexProject(process.env.GOOGLE_CLOUD_PROJECT);
   if (!apiKey || !project) {
     throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex extraction');
   }
@@ -374,7 +381,7 @@ async function generatePhasePlanWithVertex(params: {
   parsedSourceText: string;
 }) {
   const apiKey = process.env.GOOGLE_API_KEY;
-  const project = process.env.GOOGLE_CLOUD_PROJECT;
+  const project = normalizeVertexProject(process.env.GOOGLE_CLOUD_PROJECT);
   if (!apiKey || !project) {
     throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex planning');
   }
@@ -444,9 +451,11 @@ async function generatePhasePlan(params: {
   parsedSourceText: string;
 }) {
   // Primary planner: Vertex Gemini.
+  const allowXaiFallback = String(process.env.ALLOW_XAI_FALLBACK ?? 'false').toLowerCase() === 'true';
   try {
     return await generatePhasePlanWithVertex(params);
   } catch (vertexError) {
+    if (!allowXaiFallback) throw vertexError;
     console.warn('Vertex planning failed, falling back to xAI:', vertexError);
   }
 
