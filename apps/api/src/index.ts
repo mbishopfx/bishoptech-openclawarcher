@@ -176,6 +176,13 @@ function getFileExtension(name: string | undefined) {
   return name.slice(idx).toLowerCase();
 }
 
+function normalizeVertexLocation(rawLocation: string | undefined) {
+  const value = (rawLocation ?? '').trim().toLowerCase();
+  if (!value) return 'global';
+  if (/^[a-z][a-z0-9-]{1,62}$/.test(value)) return value;
+  return 'global';
+}
+
 function isPrivateIpv4(hostname: string) {
   const parts = hostname.split('.').map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
@@ -303,6 +310,62 @@ function extractAssistantTextFromResponse(payload: unknown) {
   return '';
 }
 
+function extractGeminiText(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return '';
+  const root = payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+  const parts = root.candidates?.[0]?.content?.parts ?? [];
+  return parts
+    .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+async function extractUrlWithVertexAi(url: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  const project = process.env.GOOGLE_CLOUD_PROJECT;
+  if (!apiKey || !project) {
+    throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex extraction');
+  }
+
+  const location = normalizeVertexLocation(process.env.GOOGLE_CLOUD_LOCATION);
+  const model = process.env.VERTEX_MODEL ?? 'gemini-2.5-pro';
+  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const prompt = `Extract the main user-visible content from this URL and return plain text only.
+
+URL: ${url}
+
+Requirements:
+- Preserve headings and paragraph structure where possible.
+- Include complete chat turns if this is a shared conversation page.
+- Omit nav/header/footer, cookie banners, ads, and unrelated chrome.
+- If content cannot be accessed, return exactly: UNABLE_TO_EXTRACT`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      tools: [{ url_context: {} }],
+      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Vertex extraction failed (${response.status}): ${text.slice(0, 400)}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const extracted = normalizeMultilineText(extractGeminiText(payload));
+  if (!extracted || extracted === 'UNABLE_TO_EXTRACT') {
+    throw new Error('Vertex returned no extractable content');
+  }
+
+  return extracted;
+}
+
 async function generatePhasePlan(params: {
   bucketId: string;
   title?: string | null;
@@ -384,12 +447,25 @@ async function scrapeToSimpleText(url: string): Promise<{ title: string; method:
   let text = '';
   let method = 'none';
 
+  // Vertex extraction is attempted first for URL/shared-chat pages.
   try {
-    const html = await fetchText(url);
-    const extracted = extractReadableFromHtml(html, url);
-    title = extracted.title;
-    text = extracted.text;
-    method = extracted.method;
+    const vertexText = await extractUrlWithVertexAi(url);
+    if (vertexText.length > 200) {
+      text = vertexText;
+      method = 'vertex-url-context';
+    }
+  } catch (error) {
+    console.warn('Vertex extraction failed:', error);
+  }
+
+  try {
+    if (text.length < 700) {
+      const html = await fetchText(url);
+      const extracted = extractReadableFromHtml(html, url);
+      title = extracted.title;
+      text = extracted.text;
+      method = extracted.method;
+    }
   } catch (error) {
     console.warn('Primary extraction failed:', error);
   }
