@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createSign } from 'node:crypto';
 import { isIP } from 'node:net';
 import express from 'express';
 import cors from 'cors';
@@ -190,6 +191,96 @@ function normalizeVertexProject(rawProject: string | undefined) {
   return value.toLowerCase();
 }
 
+type VertexServiceAccount = {
+  client_email: string;
+  private_key: string;
+  token_uri?: string;
+};
+
+let vertexTokenCache: { accessToken: string; expiresAtMs: number } | null = null;
+
+function encodeBase64Url(value: string) {
+  return Buffer.from(value).toString('base64url');
+}
+
+function parseVertexServiceAccount(): VertexServiceAccount | null {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<VertexServiceAccount>;
+    if (!parsed.client_email || !parsed.private_key) return null;
+    return {
+      client_email: parsed.client_email,
+      private_key: parsed.private_key,
+      token_uri: parsed.token_uri,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getVertexAccessToken() {
+  const now = Date.now();
+  if (vertexTokenCache && now < vertexTokenCache.expiresAtMs - 60_000) {
+    return vertexTokenCache.accessToken;
+  }
+
+  const serviceAccount = parseVertexServiceAccount();
+  if (!serviceAccount) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is required for Vertex OAuth authentication');
+  }
+
+  const tokenUri = serviceAccount.token_uri ?? 'https://oauth2.googleapis.com/token';
+  const issuedAt = Math.floor(now / 1000);
+  const expiry = issuedAt + 3600;
+
+  const jwtHeader = encodeBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const jwtClaim = encodeBase64Url(
+    JSON.stringify({
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/cloud-platform',
+      aud: tokenUri,
+      exp: expiry,
+      iat: issuedAt,
+    }),
+  );
+  const toSign = `${jwtHeader}.${jwtClaim}`;
+  const signer = createSign('RSA-SHA256');
+  signer.update(toSign);
+  signer.end();
+  const signature = signer.sign(serviceAccount.private_key).toString('base64url');
+  const assertion = `${toSign}.${signature}`;
+
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion,
+  });
+
+  const tokenResponse = await fetch(tokenUri, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+
+  if (!tokenResponse.ok) {
+    const text = await tokenResponse.text();
+    throw new Error(`Failed to obtain Vertex OAuth token (${tokenResponse.status}): ${text.slice(0, 400)}`);
+  }
+
+  const tokenPayload = (await tokenResponse.json()) as { access_token?: string; expires_in?: number };
+  if (!tokenPayload.access_token) {
+    throw new Error('Vertex OAuth token response did not include access_token');
+  }
+
+  const expiresInSec = tokenPayload.expires_in ?? 3600;
+  vertexTokenCache = {
+    accessToken: tokenPayload.access_token,
+    expiresAtMs: now + expiresInSec * 1000,
+  };
+
+  return tokenPayload.access_token;
+}
+
 function isPrivateIpv4(hostname: string) {
   const parts = hostname.split('.').map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
@@ -329,15 +420,15 @@ function extractGeminiText(payload: unknown) {
 }
 
 async function extractUrlWithVertexAi(url: string): Promise<string> {
-  const apiKey = process.env.GOOGLE_API_KEY;
   const project = normalizeVertexProject(process.env.GOOGLE_CLOUD_PROJECT);
-  if (!apiKey || !project) {
-    throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex extraction');
+  if (!project) {
+    throw new Error('GOOGLE_CLOUD_PROJECT is required for Vertex extraction');
   }
 
   const location = normalizeVertexLocation(process.env.GOOGLE_CLOUD_LOCATION);
   const model = process.env.VERTEX_MODEL ?? 'gemini-2.5-pro';
-  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+  const accessToken = await getVertexAccessToken();
 
   const prompt = `Extract the main user-visible content from this URL and return plain text only.
 
@@ -351,7 +442,10 @@ Requirements:
 
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${accessToken}`,
+    },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       tools: [{ url_context: {} }],
@@ -380,15 +474,15 @@ async function generatePhasePlanWithVertex(params: {
   sharedUrl?: string;
   parsedSourceText: string;
 }) {
-  const apiKey = process.env.GOOGLE_API_KEY;
   const project = normalizeVertexProject(process.env.GOOGLE_CLOUD_PROJECT);
-  if (!apiKey || !project) {
-    throw new Error('GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT are required for Vertex planning');
+  if (!project) {
+    throw new Error('GOOGLE_CLOUD_PROJECT is required for Vertex planning');
   }
 
   const location = normalizeVertexLocation(process.env.GOOGLE_CLOUD_LOCATION);
   const model = process.env.VERTEX_MODEL ?? 'gemini-2.5-pro';
-  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const endpoint = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+  const accessToken = await getVertexAccessToken();
 
   const userInput = clipForModelInput(params.parsedSourceText);
   const prompt = `You are OpenClaw planning core for production delivery plans.
@@ -423,7 +517,10 @@ ${userInput}`;
 
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${accessToken}`,
+    },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
