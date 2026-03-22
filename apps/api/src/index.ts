@@ -419,6 +419,74 @@ function extractGeminiText(payload: unknown) {
     .trim();
 }
 
+function getAiStudioApiKey() {
+  return (process.env.AI_STUDIO_API_KEY ?? process.env.GOOGLE_API_KEY ?? '').trim();
+}
+
+async function aiStudioGenerateContent(params: {
+  model?: string;
+  prompt: string;
+  useUrlContext?: boolean;
+  temperature?: number;
+  maxOutputTokens?: number;
+}) {
+  const apiKey = getAiStudioApiKey();
+  if (!apiKey) {
+    throw new Error('AI_STUDIO_API_KEY (or GOOGLE_API_KEY) is required for AI Studio Gemini calls');
+  }
+
+  const model = params.model ?? process.env.AI_STUDIO_MODEL ?? 'gemini-2.5-flash';
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: params.prompt }] }],
+      tools: params.useUrlContext ? [{ urlContext: {} }] : undefined,
+      generationConfig: {
+        temperature: params.temperature ?? 0.2,
+        maxOutputTokens: params.maxOutputTokens ?? 8192,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`AI Studio call failed (${response.status}): ${text.slice(0, 500)}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const text = normalizeMultilineText(extractGeminiText(payload));
+  if (!text) throw new Error('AI Studio response was empty');
+  return text;
+}
+
+async function extractUrlWithAiStudio(url: string): Promise<string> {
+  const prompt = `Extract the main user-visible content from this URL and return plain text only.
+
+URL: ${url}
+
+Requirements:
+- Preserve headings and paragraph structure where possible.
+- Include complete chat turns if this is a shared conversation page.
+- Omit navigation, cookie banners, ads, and unrelated chrome.
+- If content cannot be accessed, return exactly: UNABLE_TO_EXTRACT`;
+
+  const extracted = await aiStudioGenerateContent({
+    prompt,
+    useUrlContext: true,
+    temperature: 0.1,
+    maxOutputTokens: 8192,
+  });
+
+  if (!extracted || extracted === 'UNABLE_TO_EXTRACT') {
+    throw new Error('AI Studio returned no extractable content');
+  }
+
+  return extracted;
+}
+
 async function extractUrlWithVertexAi(url: string): Promise<string> {
   const project = normalizeVertexProject(process.env.GOOGLE_CLOUD_PROJECT);
   if (!project) {
@@ -465,6 +533,51 @@ Requirements:
   }
 
   return extracted;
+}
+
+async function generatePhasePlanWithAiStudio(params: {
+  bucketId: string;
+  title?: string | null;
+  sourceType: string;
+  sharedUrl?: string;
+  parsedSourceText: string;
+}) {
+  const userInput = clipForModelInput(params.parsedSourceText);
+  const prompt = `You are OpenClaw planning core for production delivery plans.
+
+Output must be plain text only.
+
+Create a concrete "Phase 1" through "Phase 4" implementation plan that takes the provided source material to production.
+Project constraints:
+- Backend platform: Railway.
+- Frontend platform: Vercel.
+- Git hosting/deployment workflow: GitHub (already authenticated in environment).
+- In Phase 4 include explicit operational deployment instructions using Railway CLI and Vercel CLI.
+- Every phase must include a Slack reporting step so execution always reports status/results to Slack.
+- Include expected artifacts, owner role suggestions, validation checks, and rollback notes per phase.
+- Include cron/build automation guidance so agents can create scheduled jobs after consuming this plan.
+
+Formatting requirements:
+- Use this section order exactly: OVERVIEW, PHASE 1, PHASE 2, PHASE 3, PHASE 4, ACCEPTANCE CHECKLIST.
+- Keep each phase action-oriented and implementation-ready.
+- Do not use markdown tables.
+- Do not include code fences.
+- Keep output under 3500 words.
+
+Context:
+Bucket ID: ${params.bucketId}
+Title: ${params.title ?? 'Untitled ingest'}
+Source Type: ${params.sourceType}
+Shared URL: ${params.sharedUrl ?? 'N/A'}
+
+Parsed Source Content:
+${userInput}`;
+
+  return aiStudioGenerateContent({
+    prompt,
+    temperature: 0.2,
+    maxOutputTokens: 8192,
+  });
 }
 
 async function generatePhasePlanWithVertex(params: {
@@ -547,7 +660,14 @@ async function generatePhasePlan(params: {
   sharedUrl?: string;
   parsedSourceText: string;
 }) {
-  // Primary planner: Vertex Gemini.
+  // Primary planner: AI Studio Gemini 2.5 Flash.
+  try {
+    return await generatePhasePlanWithAiStudio(params);
+  } catch (studioError) {
+    console.warn('AI Studio planning failed, trying Vertex fallback:', studioError);
+  }
+
+  // Secondary planner: Vertex Gemini.
   const allowXaiFallback = String(process.env.ALLOW_XAI_FALLBACK ?? 'false').toLowerCase() === 'true';
   try {
     return await generatePhasePlanWithVertex(params);
@@ -630,12 +750,25 @@ async function scrapeToSimpleText(url: string): Promise<{ title: string; method:
   let text = '';
   let method = 'none';
 
-  // Vertex extraction is attempted first for URL/shared-chat pages.
+  // AI Studio URL-context extraction is attempted first.
   try {
-    const vertexText = await extractUrlWithVertexAi(url);
-    if (vertexText.length > 200) {
-      text = vertexText;
-      method = 'vertex-url-context';
+    const studioText = await extractUrlWithAiStudio(url);
+    if (studioText.length > 200) {
+      text = studioText;
+      method = 'ai-studio-url-context';
+    }
+  } catch (error) {
+    console.warn('AI Studio URL-context extraction failed, trying Vertex fallback:', error);
+  }
+
+  // Vertex URL-context fallback.
+  try {
+    if (text.length < 700) {
+      const vertexText = await extractUrlWithVertexAi(url);
+      if (vertexText.length > text.length) {
+        text = vertexText;
+        method = 'vertex-url-context';
+      }
     }
   } catch (error) {
     console.warn('Vertex extraction failed:', error);
